@@ -84,6 +84,52 @@ class OllamaProvider(LLMProvider):
             payload["tools"] = _claude_tools_to_ollama(tools)
         return payload
 
+    async def _post_chat(self, client: httpx.AsyncClient, payload: dict) -> httpx.Response:
+        """POST /api/chat avec repli automatique sur le champ "think".
+
+        Certaines versions d'Ollama (ou certains modèles ne déclarant pas la
+        capability "thinking") répondent 400 dès que le payload contient la
+        clé "think" — c'est la cause confirmée de JRV-LLM-002 observée en
+        usage réel. On retente une seule fois sans ce champ avant d'abandonner,
+        et on journalise systématiquement le corps d'erreur d'Ollama (jusque-là
+        silencieusement perdu par raise_for_status()) pour permettre un vrai
+        diagnostic la prochaine fois.
+
+        Ne lève jamais elle-même : comme avant, c'est à l'appelant d'appeler
+        response.raise_for_status() sur la réponse retournée (celle du retry
+        en cas de repli). On détecte l'erreur ici via raise_for_status() dans
+        un try/except plutôt qu'en inspectant response.status_code directement,
+        pour rester compatible avec les mocks httpx existants de la suite de
+        tests (qui ne configurent que raise_for_status, pas status_code).
+        """
+        response = await client.post(f"{self._base_url}/api/chat", json=payload)
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body_text = exc.response.text
+            if (
+                exc.response.status_code == 400
+                and "think" in payload
+                and "think" in body_text.lower()
+            ):
+                logger.warning(
+                    "Ollama a refusé le champ 'think' — retry sans",
+                    model=self._model,
+                    ollama_error=body_text[:300],
+                )
+                fallback = {k: v for k, v in payload.items() if k != "think"}
+                return await client.post(f"{self._base_url}/api/chat", json=fallback)
+
+            logger.error(
+                "Ollama /api/chat error",
+                status=exc.response.status_code,
+                model=self._model,
+                body=body_text[:500],
+            )
+
+        return response
+
     async def complete(
         self,
         messages: list[dict],
@@ -100,7 +146,7 @@ class OllamaProvider(LLMProvider):
         # read=300 pour absorber le cold-start du modèle (chargement GPU/CPU ~100s+)
         _timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
         async with httpx.AsyncClient(timeout=_timeout) as client:
-            response = await client.post(f"{self._base_url}/api/chat", json=payload)
+            response = await self._post_chat(client, payload)
             response.raise_for_status()
             data = response.json()
             text: str = data["message"]["content"]
@@ -108,45 +154,84 @@ class OllamaProvider(LLMProvider):
             return _strip_think(text)
 
     async def _stream(self, payload: dict) -> AsyncIterator[str]:
+        """Comme _post_chat, mais pour le mode streaming.
+
+        httpx.AsyncClient.stream() ne peut pas être rejoué via un simple
+        retry de la réponse (le corps n'est lu qu'à la demande) : on construit
+        donc une liste de payloads candidats (avec puis, si refusé, sans le
+        champ "think") et on ouvre un nouveau flux HTTP pour chaque candidat,
+        en s'arrêtant dès que l'un réussit. Un seul retry maximum — pas de
+        boucle infinie possible car `candidates` a une longueur fixe (1 ou 2).
+        """
         _timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
+        candidates: list[dict] = [payload]
+        if "think" in payload:
+            candidates.append({k: v for k, v in payload.items() if k != "think"})
+
         async with httpx.AsyncClient(timeout=_timeout) as client:
-            async with client.stream("POST", f"{self._base_url}/api/chat", json=payload) as resp:
-                resp.raise_for_status()
-                in_think = False
-                think_buf = ""
+            for attempt, candidate in enumerate(candidates):
+                is_last = attempt == len(candidates) - 1
+                async with client.stream(
+                    "POST", f"{self._base_url}/api/chat", json=candidate
+                ) as resp:
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        await resp.aread()
+                        body_text = resp.text
+                        if not is_last and exc.response.status_code == 400 and (
+                            "think" in body_text.lower()
+                        ):
+                            logger.warning(
+                                "Ollama a refusé le champ 'think' (stream) — retry sans",
+                                model=self._model,
+                                ollama_error=body_text[:300],
+                            )
+                            continue
+                        logger.error(
+                            "Ollama /api/chat error (stream)",
+                            status=exc.response.status_code,
+                            model=self._model,
+                            body=body_text[:500],
+                        )
+                        raise
 
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    data = json.loads(line)
-                    delta: str = data.get("message", {}).get("content", "")
+                    in_think = False
+                    think_buf = ""
 
-                    if delta:
-                        # Filtre <think>...</think> token par token (sécurité)
-                        think_buf += delta
-                        output = ""
-                        while think_buf:
-                            if in_think:
-                                end = think_buf.find("</think>")
-                                if end == -1:
-                                    think_buf = ""
-                                    break
-                                think_buf = think_buf[end + len("</think>") :]
-                                in_think = False
-                            else:
-                                start = think_buf.find("<think>")
-                                if start == -1:
-                                    output += think_buf
-                                    think_buf = ""
-                                    break
-                                output += think_buf[:start]
-                                think_buf = think_buf[start + len("<think>") :]
-                                in_think = True
-                        if output:
-                            yield output
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        delta: str = data.get("message", {}).get("content", "")
 
-                    if data.get("done"):
-                        break
+                        if delta:
+                            # Filtre <think>...</think> token par token (sécurité)
+                            think_buf += delta
+                            output = ""
+                            while think_buf:
+                                if in_think:
+                                    end = think_buf.find("</think>")
+                                    if end == -1:
+                                        think_buf = ""
+                                        break
+                                    think_buf = think_buf[end + len("</think>") :]
+                                    in_think = False
+                                else:
+                                    start = think_buf.find("<think>")
+                                    if start == -1:
+                                        output += think_buf
+                                        think_buf = ""
+                                        break
+                                    output += think_buf[:start]
+                                    think_buf = think_buf[start + len("<think>") :]
+                                    in_think = True
+                            if output:
+                                yield output
+
+                        if data.get("done"):
+                            break
+                    return
 
     async def tool_loop(
         self,
@@ -192,7 +277,7 @@ class OllamaProvider(LLMProvider):
             }
 
             async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(f"{self._base_url}/api/chat", json=payload)
+                response = await self._post_chat(client, payload)
                 response.raise_for_status()
                 data = response.json()
 
