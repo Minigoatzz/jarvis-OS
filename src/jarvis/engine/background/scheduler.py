@@ -234,22 +234,48 @@ class Scheduler:
 
     # ── Rappels calendrier ────────────────────────────────────
 
+    # Backoff exponentiel plafonné pour _calendar_loop (JRV-BG-001 / JRV-TOL-001) :
+    # avant ce correctif, une erreur persistante (ex. credentials Google jamais
+    # configurés) faisait retenter l'appel toutes les 60s indéfiniment — vu en
+    # usage réel : 800+ lignes ERROR en 12h dans les logs pour un simple
+    # "pas configuré". _CALENDAR_BASE_INTERVAL_S reste le rythme normal tant
+    # que le tool répond correctement ; il ne s'allonge que sur échecs
+    # consécutifs, et se réinitialise dès le premier succès qui suit.
+    _CALENDAR_BASE_INTERVAL_S = 60
+    _CALENDAR_MAX_INTERVAL_S = 1800  # plafond 30 min
+
     async def _calendar_loop(self) -> None:
         seen: set[str] = set()
         await asyncio.sleep(10)  # court délai initial — calendrier pas encore auth au démarrage
+        consecutive_failures = 0
         while True:
-            await self._check_reminders(seen)
-            await asyncio.sleep(60)
+            ok = await self._check_reminders(seen)
+            if ok:
+                consecutive_failures = 0
+                delay = self._CALENDAR_BASE_INTERVAL_S
+            else:
+                consecutive_failures += 1
+                delay = min(
+                    self._CALENDAR_BASE_INTERVAL_S * (2**consecutive_failures),
+                    self._CALENDAR_MAX_INTERVAL_S,
+                )
+            await asyncio.sleep(delay)
 
     # Format renvoyé par CalendarListTool : "- 2024-01-15T14:00:00+01:00 : Titre"
     _ISO_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})")
 
-    async def _check_reminders(self, seen: set[str]) -> None:
+    async def _check_reminders(self, seen: set[str]) -> bool:
+        """Vérifie les rappels calendrier.
+
+        Retourne True si l'appel au tool a réussi (calendrier joignable, avec
+        ou sans rappel à envoyer), False sinon — utilisé par _calendar_loop
+        pour réinitialiser ou prolonger le backoff.
+        """
         try:
             result = await self._calendar_tool.execute(days_ahead=2)
             if result.is_error:
                 logger.debug("Calendar reminder: tool error", content=result.content[:80])
-                return
+                return False
             now = datetime.now(UTC)
             cutoff = self._settings.calendar_reminder_minutes
             lines = [ln.strip() for ln in result.content.splitlines() if ln.strip()]
@@ -272,9 +298,11 @@ class Scheduler:
                     seen.add(fingerprint)
                     self._proactive.broadcast(f"Rappel dans {int(delta_min)} min : {line}")
                     logger.info("Rappel calendrier envoyé", event=line[:60])
+            return True
         except Exception:
             collector.warning("JRV-BG-001", "JRV-BG-001")
             logger.exception("Calendar reminder error")
+            return False
 
     # ── AutoDream nocturne ────────────────────────────────────
 

@@ -46,6 +46,20 @@ from jarvis.providers.audio.elevenlabs_voices import resolve_voice_id
 
 load_dotenv(PROJECT_ROOT / ".env")
 
+# Repli sur le serveur LiveKit local (bundle\bin\livekit-server.exe --dev,
+# démarré par jarvis.ps1 / Invoke-JarvisRun) quand LIVEKIT_URL n'est pas
+# configuré. .env.example ne documente que le cas LiveKit Cloud
+# (wss://ton-projet.livekit.cloud) : un .env par défaut qui laisse LIVEKIT_URL
+# vide fait planter le worker au démarrage ("ws_url manquant"), alors que le
+# serveur LiveKit local, lui, démarre correctement — observé en usage réel.
+# Ces valeurs correspondent exactement à --keys "devkey: devsecret..." utilisé
+# par jarvis.ps1 pour lancer livekit-server --dev ; si LIVEKIT_URL est déjà
+# configuré (Cloud ou autre), ce bloc ne touche à rien.
+if not os.environ.get("LIVEKIT_URL", "").strip():
+    os.environ["LIVEKIT_URL"] = "ws://localhost:7880"
+    os.environ["LIVEKIT_API_KEY"] = "devkey"
+    os.environ["LIVEKIT_API_SECRET"] = "devsecretdevsecretdevsecretdevsecret"
+
 # Réduit le bruit du terminal : warnings Python + format loguru aligné sur main.py.
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 try:

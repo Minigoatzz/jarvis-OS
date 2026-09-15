@@ -17,8 +17,37 @@ class MemoryIndex:
     MEMORY.md ne contient que des pointeurs, jamais de contenu direct.
     """
 
+    _TEMPLATE = (
+        "# MEMORY.md\n\n"
+        "Index des pointeurs mémoire. Ce fichier ne contient que des "
+        "pointeurs vers les fichiers thématiques détaillés (topics/) et les "
+        "transcripts de session (sessions/), jamais de contenu direct.\n"
+    )
+
     def __init__(self, memory_dir: Path) -> None:
         self._path = memory_dir / "MEMORY.md"
+        # Bootstrap au premier lancement : sans ce bloc, memory_data/ (et donc
+        # MEMORY.md) n'existe pas tant qu'aucun pointeur n'a été ajouté via
+        # add_pointer() — et Agent._build_system() appelle read() à CHAQUE
+        # tour de conversation pour construire le prompt système. Résultat
+        # observé en usage réel : un FileNotFoundError rattrapé (donc pas de
+        # crash) mais loggé en WARNING à chaque tour, dès la première
+        # conversation — 20+ occurrences en une session avant le premier
+        # add_pointer(). SessionStore et TopicStore, les deux classes sœurs de
+        # ce module, créent déjà leur propre répertoire ainsi en __init__ ;
+        # MemoryIndex ne le faisait pas et ne crée pas non plus le fichier
+        # lui-même, contrairement à un répertoire vide qui est un état de
+        # démarrage normal.
+        try:
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            if not self._path.exists():
+                self._path.write_text(self._TEMPLATE, encoding="utf-8")
+                logger.info("MemoryIndex bootstrap : MEMORY.md créé", path=str(self._path))
+        except OSError as e:
+            # Ne bloque pas le démarrage : read()/_write() gèrent déjà l'échec
+            # (JRV-MEM-001) si le problème persiste (ex. permissions).
+            collector.warning("JRV-MEM-001", "JRV-MEM-001", cause=e)
+            logger.error("MemoryIndex bootstrap failed", error=str(e))
 
     def read(self) -> str:
         try:
