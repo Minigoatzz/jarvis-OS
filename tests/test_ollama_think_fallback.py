@@ -42,7 +42,9 @@ _WEATHER_TOOL = {
 _REQUEST = httpx.Request("POST", "http://ollama.local:11434/api/chat")
 
 
-def _real_response(status_code: int, json_data: dict | None = None, text: str = "") -> httpx.Response:
+def _real_response(
+    status_code: int, json_data: dict | None = None, text: str = ""
+) -> httpx.Response:
     """Construit un vrai httpx.Response (pas un mock) pour un comportement fidèle."""
     content = json.dumps(json_data).encode() if json_data is not None else text.encode()
     return httpx.Response(status_code=status_code, content=content, request=_REQUEST)

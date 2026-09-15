@@ -717,6 +717,16 @@ ERROR_REGISTRY: dict[str, ErrorSpec] = {
         "since": '0.3.3',
         "modules": ['capabilities/tools/map_control.py'],
     },
+    "JRV-TOL-015": {
+        "domain": 'TOL',
+        "severity": 'warning',
+        "title_fr": 'Intégration non configurée',
+        "message_fr": "Un outil externe n'a ni identifiants ni configuration ; il reste inactif.",
+        "resolution_fr": "Configure l'intégration voulue (credentials, .env) ; sinon ce message est normal et sans conséquence.",
+        "docs": ['04-capabilities/tools-overview.md'],
+        "since": '0.3.3',
+        "modules": ['capabilities/tools/calendar.py'],
+    },
     "JRV-UNK-001": {
         "domain": 'UNK',
         "severity": 'error',

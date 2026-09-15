@@ -76,6 +76,7 @@ Terminal format: `[JRV-XXX-NNN] ERROR|WARN|IMPOSSIBLE: message`
 | `JRV-TOL-012` | warning | Échec outil météo | Vérifie OPENWEATHER_API_KEY ou la connectivité réseau. | `04-capabilities/tools/weather.md` |
 | `JRV-TOL-013` | error | Échec sous-agent | Consulte api.log pour la mission enfant et le tool parent. | `04-capabilities/tools/subagent.md` |
 | `JRV-TOL-014` | warning | Échec contrôle carte | Vérifie que l'UI globe est ouverte et que l'API map répond. | `04-capabilities/tools/map_control.md` |
+| `JRV-TOL-015` | warning | Intégration non configurée | Configure l'intégration voulue (credentials, .env) ; sinon ce message est normal et sans conséquence. | `04-capabilities/tools-overview.md` |
 | `JRV-UNK-001` | error | Exception non gérée | Consulte les logs %TEMP%\\jarvis\\api.log et le traceback complet en mode debug. | `09-operations/logs-and-doctor.md` |
 | `JRV-VIS-001` | warning | Échec daemon vision | Vérifie les deps vision et vision.log. | `03-providers/vision/daemon.md` |
 | `JRV-VOI-001` | error | LiveKit indisponible (7880) | Relance .\\jarvis.ps1 run ; vérifie livekit.log. | `06-interfaces/voice-livekit.md` |

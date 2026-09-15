@@ -25,12 +25,16 @@ normal), un MEMORY.md absent fait échouer read() par construction.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
+if TYPE_CHECKING:
+    from jarvis.providers.memory.index import MemoryIndex
 
-def _index(memory_dir: Path):
+
+def _index(memory_dir: Path) -> MemoryIndex:
     from jarvis.providers.memory.index import MemoryIndex
 
     return MemoryIndex(memory_dir)

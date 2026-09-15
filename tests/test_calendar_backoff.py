@@ -2,7 +2,7 @@
 # This file is part of Jarvis OS, licensed under the GNU AGPL-3.0-or-later.
 # See the LICENSE file or <https://www.gnu.org/licenses/agpl-3.0.html>.
 
-"""Tests — backoff du rappel calendrier (JRV-BG-001) et sévérité credentials (JRV-TOL-001).
+"""Tests — backoff du rappel calendrier (JRV-BG-001) et sévérité credentials (JRV-TOL-015).
 
 Reproduit un bug observé en usage réel : Scheduler._calendar_loop retentait
 CalendarListTool.execute() toutes les 60s indéfiniment, sans repli, même quand
@@ -10,10 +10,11 @@ l'échec est permanent (credentials Google jamais configurés). Preuve tirée de
 logs réels : 844 occurrences de "Credentials Google manquants" en ~12h, chacune
 loggée en ERROR. Deux correctifs couverts ici :
 
-1. CalendarListTool.execute() : un FileNotFoundError (pas configuré) est
-   maintenant loggé en WARNING, pas en ERROR — même traitement que
-   EmailCollector pour le même cas (JRV-PRO-001). Les autres exceptions
-   restent en ERROR.
+1. CalendarListTool.execute() : un FileNotFoundError (pas configuré) émet
+   désormais JRV-TOL-015, enregistré en `warning`, au lieu de JRV-TOL-001,
+   enregistré en `error`. Changer le niveau au site d'appel ne suffisait PAS :
+   ErrorCollector.emit() résout la sévérité depuis ERROR_REGISTRY avant de
+   regarder le niveau de l'appelant. Les vraies pannes restent en ERROR.
 2. Scheduler._calendar_loop : backoff exponentiel plafonné (60s → 1800s) sur
    échecs consécutifs, réinitialisé au premier succès qui suit.
 """
@@ -21,17 +22,61 @@ loggée en ERROR. Deux correctifs couverts ici :
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING, Never
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# ── CalendarListTool : sévérité credentials (JRV-TOL-001) ──────────────────────
+if TYPE_CHECKING:
+    from jarvis.capabilities.tools.base import ToolResult
+    from jarvis.engine.background.scheduler import Scheduler
+
+# ── CalendarListTool : sévérité credentials (JRV-TOL-015) ──────────────────────
+#
+# Ces tests capturent le niveau RÉELLEMENT émis par loguru, via le vrai
+# ErrorCollector — ils ne mockent pas `collector`. C'est la seule formulation
+# qui a du sens ici : une première version de ces tests mockait le collector et
+# vérifiait que `.warning()` était appelé, ce qui est tautologique (ça teste que
+# le code appelle ce qu'on vient d'écrire). Elle passait au vert alors que la
+# ligne ERROR continuait de sortir en production, parce que
+# ErrorCollector.emit() résout la sévérité depuis ERROR_REGISTRY *avant* le
+# niveau de l'appelant : `severity = spec.get("severity") or _LEVEL_TO_...`.
+# Un code enregistré en `error` ignore donc collector.warning(). D'où
+# JRV-TOL-015, enregistré en `warning`.
+
+
+@pytest.fixture
+def loguru_levels() -> Iterator[list[str]]:
+    """Capture le niveau de chaque enregistrement loguru émis pendant le test."""
+    from loguru import logger
+
+    records: list[str] = []
+    sink_id = logger.add(lambda m: records.append(m.record["level"].name), level="DEBUG")
+    try:
+        yield records
+    finally:
+        logger.remove(sink_id)
+
+
+def test_jrv_tol_015_is_registered_as_warning() -> None:
+    """Garde-fou : c'est le registre, pas le site d'appel, qui fixe la sévérité.
+
+    Si quelqu'un repasse ce code en `error` dans error-codes.yaml, le correctif
+    calendrier redevient silencieusement inopérant — ce test le signale.
+    """
+    from jarvis.kernel._error_codes_generated import ERROR_REGISTRY
+
+    assert ERROR_REGISTRY["JRV-TOL-015"]["severity"] == "warning"
+    assert ERROR_REGISTRY["JRV-TOL-001"]["severity"] == "error"
 
 
 @pytest.mark.asyncio
-async def test_calendar_missing_credentials_logs_warning_not_error(tmp_path: Path) -> None:
-    """FileNotFoundError (pas configuré) -> collector.warning, pas collector.error."""
+async def test_calendar_missing_credentials_emits_warning_level(
+    tmp_path: Path, loguru_levels: list[str]
+) -> None:
+    """Pas configuré -> loguru émet WARNING (et zéro ERROR), collector réel."""
     from jarvis.capabilities.tools.calendar import CalendarListTool
 
     tool = CalendarListTool(
@@ -41,18 +86,20 @@ async def test_calendar_missing_credentials_logs_warning_not_error(tmp_path: Pat
     with patch(
         "jarvis.capabilities.tools.calendar._load_creds",
         side_effect=FileNotFoundError("Credentials Google manquants : missing_creds.json"),
-    ), patch("jarvis.capabilities.tools.calendar.collector") as mock_collector:
+    ):
         result = await tool.execute(days_ahead=2)
 
     assert result.is_error
     assert "Erreur credentials" in result.content
-    mock_collector.warning.assert_called_once()
-    mock_collector.error.assert_not_called()
+    assert "WARNING" in loguru_levels
+    assert "ERROR" not in loguru_levels, f"niveau ERROR encore émis : {loguru_levels}"
 
 
 @pytest.mark.asyncio
-async def test_calendar_other_exception_still_logs_error(tmp_path: Path) -> None:
-    """Une exception non liée aux credentials manquants reste en ERROR (pas masquée)."""
+async def test_calendar_other_exception_still_emits_error_level(
+    tmp_path: Path, loguru_levels: list[str]
+) -> None:
+    """Une panne réelle reste en ERROR — le correctif ne doit rien masquer d'autre."""
     from jarvis.capabilities.tools.calendar import CalendarListTool
 
     tool = CalendarListTool(
@@ -62,12 +109,38 @@ async def test_calendar_other_exception_still_logs_error(tmp_path: Path) -> None
     with patch(
         "jarvis.capabilities.tools.calendar._load_creds",
         side_effect=RuntimeError("token corrompu"),
-    ), patch("jarvis.capabilities.tools.calendar.collector") as mock_collector:
+    ):
         result = await tool.execute(days_ahead=2)
 
     assert result.is_error
-    mock_collector.error.assert_called_once()
-    mock_collector.warning.assert_not_called()
+    assert "ERROR" in loguru_levels
+
+
+@pytest.mark.asyncio
+async def test_calendar_missing_credentials_stderr_line_says_warn(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """La ligne stderr `[JRV-...] WARN:` et la ligne loguru doivent s'accorder.
+
+    Avant le correctif elles se contredisaient : `[JRV-TOL-001] WARN:` suivi de
+    `| ERROR |` pour le même événement (emit_to_stderr utilise le niveau de
+    l'appelant, loguru celui du registre).
+    """
+    from jarvis.capabilities.tools.calendar import CalendarListTool
+
+    tool = CalendarListTool(
+        credentials_path=tmp_path / "missing_creds.json", token_path=tmp_path / "token.json"
+    )
+
+    with patch(
+        "jarvis.capabilities.tools.calendar._load_creds",
+        side_effect=FileNotFoundError("Credentials Google manquants : missing_creds.json"),
+    ):
+        await tool.execute(days_ahead=2)
+
+    err = capsys.readouterr().err
+    assert "[JRV-TOL-015] WARN:" in err
+    assert "[JRV-TOL-015] ERROR:" not in err
 
 
 @pytest.mark.asyncio
@@ -108,15 +181,15 @@ class _FakeCalendarTool:
         self._results = results
         self.calls = 0
 
-    async def execute(self, days_ahead: int = 2, **_: object):  # noqa: ANN401
+    async def execute(self, days_ahead: int = 2, **_: object) -> ToolResult:
         idx = min(self.calls, len(self._results) - 1)
         self.calls += 1
         return self._results[idx]
 
 
-def _make_scheduler(calendar_tool: object):
-    from jarvis.engine.background.scheduler import Scheduler
+def _make_scheduler(calendar_tool: object) -> Scheduler:
     from jarvis.engine.background.notifications import ProactiveQueue
+    from jarvis.engine.background.scheduler import Scheduler
     from jarvis.kernel.settings import settings
 
     return Scheduler(
@@ -141,7 +214,7 @@ async def test_check_reminders_returns_false_on_tool_error() -> None:
 @pytest.mark.asyncio
 async def test_check_reminders_returns_false_on_exception() -> None:
     class _RaisingTool:
-        async def execute(self, days_ahead: int = 2, **_: object):  # noqa: ANN401
+        async def execute(self, days_ahead: int = 2, **_: object) -> Never:
             raise RuntimeError("boom")
 
     scheduler = _make_scheduler(_RaisingTool())

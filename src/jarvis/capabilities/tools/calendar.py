@@ -90,13 +90,15 @@ class CalendarListTool(Tool):
         try:
             creds = await asyncio.to_thread(_load_creds, self._token, self._creds)
         except FileNotFoundError as e:
-            # Pas configuré, pas une panne : même traitement que EmailCollector
-            # (jarvis.engine.proactive.collectors.email) pour le même cas. Avant ce
-            # correctif, ce chemin loggait en ERROR sur chaque appel — avec le
-            # rappel calendrier de Scheduler._calendar_loop toutes les 60s, ça
-            # produisait 800+ lignes ERROR en 12h dans les logs réels pour un
-            # simple "credentials pas encore configurés".
-            collector.warning("JRV-TOL-001", "JRV-TOL-001", cause=e)
+            # Pas configuré, pas une panne — d'où un code dédié, et non
+            # collector.warning("JRV-TOL-001") : ErrorCollector.emit() lit la
+            # sévérité dans ERROR_REGISTRY *avant* le niveau passé par l'appelant
+            # (kernel/error_collector.py : `spec.get("severity") or ...`), donc un
+            # code enregistré en `error` reste loggé en ERROR quoi que fasse le
+            # site d'appel. JRV-TOL-015 est enregistré en `warning`.
+            # Sans ça : 800+ lignes ERROR en 12h dans les logs réels (rappel
+            # calendrier toutes les 60s) pour un simple "pas encore configuré".
+            collector.warning("JRV-TOL-015", "JRV-TOL-015", cause=e)
             logger.debug(f"Calendar: credentials non configurés ({e})")
             return ToolResult(content=f"Erreur credentials : {e}", is_error=True)
         except Exception as e:
