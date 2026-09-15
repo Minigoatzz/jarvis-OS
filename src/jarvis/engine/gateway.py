@@ -118,6 +118,38 @@ class Gateway:
                         name="cf-tools",
                     )
 
+                # Repli déterministe : le modèle voulait un outil mais n'a émis
+                # aucun tool_call natif. Arrive avec les modèles locaux, que le
+                # prompt statique entraîne par l'exemple à écrire
+                # `outil(arg="valeur")` en texte. Sans ce repli la demande est
+                # perdue en silence : la ligne s'affiche, rien ne s'exécute, et
+                # aucune erreur n'est journalisée. tool_loop(), lui, fait du
+                # function calling natif non streamé et reste déterministe —
+                # c'est le chemin que décrit la docstring de respond_tools,
+                # orphelin depuis l'arrivée de la capture streamée.
+                if tool_task is None and (
+                    route is RouteEnum.CONFIRM_FIRE or agent.mentions_tool_call_in_text(ack_text)
+                ):
+                    logger.warning(
+                        "Intention d'outil sans tool_call natif — repli tool_loop",
+                        route=route.value,
+                        ack_preview=ack_text[:80],
+                    )
+                    try:
+                        fallback_text = await agent.respond_tools(
+                            session, notifications=notif_texts
+                        )
+                        if ack_text.strip() and fallback_text.strip():
+                            yield "\n\n"
+                        yield fallback_text
+                    except Exception as e:
+                        collector.error("JRV-GWY-001", "JRV-GWY-001", cause=e)
+                        logger.opt(exception=True).error(
+                            "Repli tool_loop échoué", error=type(e).__name__, detail=str(e)
+                        )
+                        notifications.add(f"Outil échoué : {e}")
+                        yield friendly_llm_error(e)
+
                 # Second appel LLM pour synthétiser les résultats — avant "done"
                 if tool_task is not None:
                     try:

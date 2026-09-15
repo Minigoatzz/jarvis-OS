@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -156,6 +157,27 @@ class Agent:
             dynamic_parts.append(
                 f"## Outils disponibles (router [CF] pour les utiliser)\n\n{tool_lines}"
             )
+            # Contre-instruction indispensable aux modèles locaux. Le prompt
+            # statique illustre les outils par des exemples du type
+            # `execute_cli(command="open -a 'Safari'")` : Claude les lit comme
+            # une indication d'intention et appelle quand même nativement, un
+            # modèle local de 14B les recopie littéralement en texte. Le gateway
+            # ne déclenche l'exécution que sur un tool_call NATIF — la ligne
+            # s'affichait donc dans la conversation sans que rien ne s'exécute
+            # (observé en usage réel avec qwen3:14b sur « pause ma musique »).
+            if _s.llm_provider == "local":
+                dynamic_parts.append(
+                    "## Comment appeler un outil — mécanisme natif OBLIGATOIRE\n\n"
+                    "Les outils ci-dessus te sont fournis par le mécanisme natif de "
+                    "function calling. Pour en utiliser un, ÉMETS UN APPEL D'OUTIL "
+                    "NATIF.\n\n"
+                    "N'écris JAMAIS l'appel en texte dans ta réponse. Écrire "
+                    "`spotify_control(action=\"pause\")` n'exécute RIEN : "
+                    "l'utilisateur voit cette ligne et sa musique continue.\n\n"
+                    "Les notations `outil(arg=\"valeur\")` qui apparaissent ailleurs "
+                    "dans ce prompt indiquent QUEL outil employer et avec quels "
+                    "arguments — ce ne sont pas un format de sortie."
+                )
 
         if self._skill_registry is not None:
             skills_prompt = self._skill_registry.get_combined_system_prompt()
@@ -176,6 +198,27 @@ class Agent:
             and self._tool_registry.has_tools()
             and self._llm.supports_tools
         )
+
+    def mentions_tool_call_in_text(self, text: str) -> bool:
+        """Détecte un appel d'outil écrit EN TEXTE au lieu d'être émis nativement.
+
+        Ex. : `spotify_control(action="pause")` dans le corps de la réponse. Les
+        modèles locaux recopient cette notation depuis les exemples du prompt
+        statique ; le gateway n'exécutant que les tool_calls natifs, la demande
+        était perdue — l'utilisateur voyait la ligne et rien ne se passait.
+
+        Ne matche QUE des noms d'outils réellement enregistrés suivis d'une
+        parenthèse : une réponse qui parle de musique ou cite une fonction
+        inexistante ne déclenche rien. Sert de repli au tag [CF], qu'un modèle
+        local n'émet pas toujours.
+        """
+        if self._tool_registry is None or not text.strip():
+            return False
+        for schema in self._tool_registry.schemas():
+            name = str(schema.get("name", ""))
+            if name and re.search(rf"\b{re.escape(name)}\s*\(", text):
+                return True
+        return False
 
     async def respond(
         self,
