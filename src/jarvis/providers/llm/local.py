@@ -13,6 +13,7 @@ import httpx
 from loguru import logger
 
 from jarvis.kernel.error_collector import collector  # jrv: autofix
+from jarvis.kernel.schemas import ToolCapture
 from jarvis.kernel.settings import settings
 from jarvis.providers.llm.base import LLMProvider
 
@@ -23,6 +24,38 @@ _MAX_TOOL_ITERATIONS = 8
 
 def _strip_think(text: str) -> str:
     return _THINK_RE.sub("", text).lstrip()
+
+
+def _parse_ollama_tool_calls(
+    raw_tool_calls: list[dict], id_hint: str
+) -> list[tuple[str, str, dict]]:
+    """Normalise les tool_calls Ollama en (id, nom, arguments).
+
+    Ollama n'émet pas toujours d'`id`, et `arguments` est tantôt un dict, tantôt
+    une chaîne JSON selon le modèle — les deux sont gérés. Partagé par tool_loop
+    (non streaming) et _stream (capture streaming) pour que les deux chemins
+    interprètent identiquement une même réponse.
+    """
+    parsed: list[tuple[str, str, dict]] = []
+    for i, tc in enumerate(raw_tool_calls):
+        fn = tc.get("function", {})
+        name: str = fn.get("name", "")
+        raw_args = fn.get("arguments", {})
+        call_id: str = tc.get("id") or f"call_{name}_{id_hint}_{i}"
+
+        if isinstance(raw_args, str):
+            try:
+                args: dict = json.loads(raw_args)
+            except json.JSONDecodeError:
+                collector.error("JRV-LLM-002", "JRV-LLM-002")
+                args = {}
+        elif isinstance(raw_args, dict):
+            args = raw_args
+        else:
+            args = {}
+
+        parsed.append((call_id, name, args))
+    return parsed
 
 
 def _claude_tools_to_ollama(tools: list[dict]) -> list[dict]:
@@ -78,7 +111,7 @@ class OllamaProvider(LLMProvider):
             "messages": [{"role": "system", "content": system}, *messages],
             "stream": stream,
             "think": False,  # désactive le mode reasoning Qwen3 côté Ollama
-            "options": {"temperature": 0.7},
+            "options": {"temperature": 0.7, "num_ctx": settings.ollama_num_ctx},
         }
         if tools:
             payload["tools"] = _claude_tools_to_ollama(tools)
@@ -153,7 +186,34 @@ class OllamaProvider(LLMProvider):
             logger.debug("Ollama complete", model=self._model, chars=len(text))
             return _strip_think(text)
 
-    async def _stream(self, payload: dict) -> AsyncIterator[str]:
+    def stream_with_capture(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict] | None = None,
+    ) -> tuple[AsyncIterator[str], ToolCapture]:
+        """Stream le texte ET capture les tool_calls — contrat commun aux providers.
+
+        Sans cette méthode, Agent.start_routing_stream() retombait sur sa branche
+        « provider sans outil », sélectionnée par un simple
+        `hasattr(self._llm, "stream_with_capture")`. Cette branche appelle
+        complete(stream=True) SANS transmettre `tools` : le payload envoyé à
+        Ollama ne contenait donc aucun schéma d'outil, et la capture rendue au
+        gateway valait None. Le modèle ne connaissait les outils que par leur
+        description en toutes lettres dans le prompt système (les skills-vues y
+        documentent `show_view(action="show", view_id="clock")`) et recopiait
+        cette notation en texte : « spotify_control(action="pause") » s'affichait
+        dans la conversation et rien ne s'exécutait. Observé en usage réel — en
+        mode local, AUCUN outil ne pouvait s'exécuter en conversation normale,
+        alors que tool_loop() ci-dessous implémentait déjà l'appel natif.
+        """
+        capture = ToolCapture()
+        payload = self._payload(messages, system, stream=True, tools=tools)
+        return self._stream(payload, capture), capture
+
+    async def _stream(
+        self, payload: dict, capture: ToolCapture | None = None
+    ) -> AsyncIterator[str]:
         """Comme _post_chat, mais pour le mode streaming.
 
         httpx.AsyncClient.stream() ne peut pas être rejoué via un simple
@@ -203,7 +263,22 @@ class OllamaProvider(LLMProvider):
                         if not line:
                             continue
                         data = json.loads(line)
-                        delta: str = data.get("message", {}).get("content", "")
+                        message: dict = data.get("message", {})
+
+                        # Ollama émet les tool_calls complets dans un chunk (pas
+                        # de JSON partiel token par token comme Anthropic) : on
+                        # les capture au passage sans interrompre le flux texte.
+                        if capture is not None:
+                            raw_calls: list[dict] = message.get("tool_calls") or []
+                            if raw_calls:
+                                capture.calls.extend(
+                                    _parse_ollama_tool_calls(
+                                        raw_calls, id_hint=f"stream{len(capture.calls)}"
+                                    )
+                                )
+                                capture.stop_reason = "tool_use"
+
+                        delta: str = message.get("content", "")
 
                         if delta:
                             # Filtre <think>...</think> token par token (sécurité)
@@ -272,7 +347,7 @@ class OllamaProvider(LLMProvider):
                 "messages": current,
                 "stream": False,
                 "think": False,
-                "options": {"temperature": 0.7},
+                "options": {"temperature": 0.7, "num_ctx": settings.ollama_num_ctx},
                 "tools": ollama_tools,
             }
 
@@ -299,25 +374,7 @@ class OllamaProvider(LLMProvider):
             )
 
             # Parse les tool calls : arguments peuvent être dict OU string JSON
-            parsed: list[tuple[str, str, dict]] = []
-            for i, tc in enumerate(raw_tool_calls):
-                fn = tc.get("function", {})
-                tc_name: str = fn.get("name", "")
-                raw_args = fn.get("arguments", {})
-                call_id: str = tc.get("id", f"call_{tc_name}_{iteration}_{i}")
-
-                if isinstance(raw_args, str):
-                    try:
-                        tc_args: dict = json.loads(raw_args)
-                    except json.JSONDecodeError:
-                        collector.error("JRV-LLM-002", "JRV-LLM-002")
-                        tc_args = {}
-                elif isinstance(raw_args, dict):
-                    tc_args = raw_args
-                else:
-                    tc_args = {}
-
-                parsed.append((call_id, tc_name, tc_args))
+            parsed = _parse_ollama_tool_calls(raw_tool_calls, id_hint=str(iteration))
 
             results: list[tuple[str, str]] = await asyncio.gather(
                 *(_exec_one(cid, n, a) for cid, n, a in parsed)

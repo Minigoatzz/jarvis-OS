@@ -81,6 +81,22 @@ class Settings(BaseSettings):
         description="URL du serveur Ollama.",
     )
     ollama_model: str = Field(default="mistral", description="Modèle Ollama à utiliser.")
+    ollama_num_ctx: int = Field(
+        default=16384,
+        ge=2048,
+        description=(
+            "Fenêtre de contexte demandée à Ollama (options.num_ctx), par requête. "
+            "Sans ce champ, Ollama applique son défaut calculé sur la VRAM — 4096 sur "
+            "une carte 16 Go — trop court ici : le prompt système embarque l'index "
+            "mémoire, les préférences, les fichiers topics, les prompts de skills ET "
+            "les schémas de tous les outils. Au-delà, Ollama tronque par le début, "
+            "donc silencieusement les schémas d'outils. Réglé par requête et non via "
+            "OLLAMA_CONTEXT_LENGTH pour ne pas modifier le serveur Ollama partagé "
+            "avec d'autres usages. Plus la valeur est haute, plus le cache KV occupe "
+            "de VRAM : si le modèle déborde sur le CPU, l'inférence ralentit "
+            "nettement — baisser à 8192 dans ce cas."
+        ),
+    )
 
     # ── Serveur ───────────────────────────────────────────────
     host: str = Field(

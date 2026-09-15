@@ -251,7 +251,13 @@ class Agent:
             )
             return stream, capture
 
-        # Provider sans outil (Ollama, Mistral) — wrapper async pour await complete()
+        # Repli pour un provider sans stream_with_capture : complete() est appele
+        # SANS `tools`, donc le modele ne recoit aucun schema d'outil et la capture
+        # rendue vaut None — aucun outil ne peut s'executer sur ce chemin. Ce n'est
+        # donc PAS un simple repli de streaming. L'ancien commentaire citait ici
+        # "(Ollama, Mistral)" : les deux implementent desormais stream_with_capture,
+        # et c'est justement son absence cote Ollama qui rendait tous les outils
+        # inertes en mode local sans le moindre message d'erreur.
         messages_snap = list(session.messages)
 
         async def _simple_stream() -> AsyncIterator[str]:
