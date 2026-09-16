@@ -118,37 +118,31 @@ class Gateway:
                         name="cf-tools",
                     )
 
-                # Repli déterministe : le modèle voulait un outil mais n'a émis
-                # aucun tool_call natif. Arrive avec les modèles locaux, que le
-                # prompt statique entraîne par l'exemple à écrire
-                # `outil(arg="valeur")` en texte. Sans ce repli la demande est
-                # perdue en silence : la ligne s'affiche, rien ne s'exécute, et
-                # aucune erreur n'est journalisée. tool_loop(), lui, fait du
-                # function calling natif non streamé et reste déterministe —
-                # c'est le chemin que décrit la docstring de respond_tools,
-                # orphelin depuis l'arrivée de la capture streamée.
-                if tool_task is None and (
-                    route is RouteEnum.CONFIRM_FIRE or agent.mentions_tool_call_in_text(ack_text)
-                ):
-                    logger.warning(
-                        "Intention d'outil sans tool_call natif — repli tool_loop",
-                        route=route.value,
-                        ack_preview=ack_text[:80],
-                    )
-                    try:
-                        fallback_text = await agent.respond_tools(
-                            session, notifications=notif_texts
+                # Le modèle a écrit l'appel EN TEXTE au lieu de l'émettre nativement
+                # — format que le prompt statique définit lui-même par l'exemple
+                # (`execute_cli(command="...")`). Constaté en usage réel : qwen3:14b
+                # ne renvoie AUCUN tool_calls natif, même en non-streaming avec les
+                # schémas dans le payload. On analyse donc le texte et on peuple la
+                # même ToolCapture : le reste du flux (exécution parallèle puis
+                # synthèse) est stricement identique au chemin natif.
+                #
+                # Un repli par tool_loop() a été essayé ici et retiré : il repose sur
+                # le même function calling natif qui ne répond pas, et se contentait
+                # donc de répéter la même phrase — l'utilisateur voyait sa demande
+                # énoncée deux fois sans que rien ne s'exécute.
+                if tool_task is None and tool_capture is not None and not tool_capture.calls:
+                    text_calls = agent.extract_text_tool_calls(ack_text)
+                    if text_calls:
+                        logger.warning(
+                            "Appel d'outil écrit en texte — exécution via l'analyseur",
+                            route=route.value,
+                            names=[n for _, n, _ in text_calls],
                         )
-                        if ack_text.strip() and fallback_text.strip():
-                            yield "\n\n"
-                        yield fallback_text
-                    except Exception as e:
-                        collector.error("JRV-GWY-001", "JRV-GWY-001", cause=e)
-                        logger.opt(exception=True).error(
-                            "Repli tool_loop échoué", error=type(e).__name__, detail=str(e)
+                        tool_capture.calls.extend(text_calls)
+                        tool_task = asyncio.create_task(
+                            agent.execute_captured_tools(tool_capture),
+                            name="cf-tools-text",
                         )
-                        notifications.add(f"Outil échoué : {e}")
-                        yield friendly_llm_error(e)
 
                 # Second appel LLM pour synthétiser les résultats — avant "done"
                 if tool_task is not None:

@@ -63,10 +63,17 @@ class _FakeLLM:
     bien atteint le function calling natif.
     """
 
-    def __init__(self, stream_text: str, tool_loop_reply: str = "C'est en pause.") -> None:
+    def __init__(
+        self,
+        stream_text: str,
+        tool_loop_reply: str = "(tool_loop)",
+        synth_reply: str = "C'est en pause.",
+    ) -> None:
         self._stream_text = stream_text
         self._tool_loop_reply = tool_loop_reply
+        self._synth_reply = synth_reply
         self.tool_loop_calls = 0
+        self.complete_calls = 0
 
     @property
     def supports_tools(self) -> bool:
@@ -93,13 +100,19 @@ class _FakeLLM:
         tool_executor: object,
         context: str = "",
     ) -> str:
-        """Function calling natif : exécute réellement l'outil demandé."""
+        """Ne doit PLUS être appelé : il repose sur le même function calling natif
+        qui ne répond pas, et ne faisait que répéter la phrase du modèle."""
         self.tool_loop_calls += 1
-        await tool_executor("spotify_control", {"action": "pause"})  # type: ignore[operator]
         return self._tool_loop_reply
 
-    async def complete(self, *a: object, **k: object) -> str:
-        return ""
+    async def complete(self, *a: object, **k: object) -> AsyncIterator[str]:
+        """Sert la synthèse post-outils (2e appel LLM, streamé)."""
+        self.complete_calls += 1
+
+        async def _gen() -> AsyncIterator[str]:
+            yield self._synth_reply
+
+        return _gen()
 
 
 def _build(stream_text: str) -> tuple[Gateway, _SpotifyTool, _FakeLLM]:
@@ -138,7 +151,8 @@ async def test_text_written_tool_call_is_actually_executed() -> None:
     await _run(gateway, "pause ma musique")
 
     assert tool.calls == [{"action": "pause"}], "l'outil Spotify n'a jamais été exécuté"
-    assert llm.tool_loop_calls == 1
+    assert llm.tool_loop_calls == 0, "tool_loop répète la demande sans l'exécuter — retiré"
+    assert llm.complete_calls == 1, "la synthèse post-outil doit avoir lieu"
 
 
 @pytest.mark.asyncio
@@ -148,7 +162,7 @@ async def test_fallback_reply_reaches_the_user() -> None:
 
     out = await _run(gateway, "pause ma musique")
 
-    assert "C'est en pause." in out
+    assert "C'est en pause." in out  # la synthèse, pas la phrase répétée
 
 
 @pytest.mark.asyncio
@@ -159,7 +173,7 @@ async def test_fallback_fires_without_cf_tag() -> None:
     await _run(gateway, "pause ma musique")
 
     assert tool.calls == [{"action": "pause"}]
-    assert llm.tool_loop_calls == 1
+    assert llm.tool_loop_calls == 0
 
 
 # ── Non-régression : ne pas déclencher tool_loop à tort ─────────────────────
@@ -256,3 +270,74 @@ def test_cloud_mode_prompt_unchanged() -> None:
     prompt = _system_prompt_for("api")
 
     assert "N'écris JAMAIS l'appel en texte" not in prompt
+
+
+# ── L'analyseur d'appels écrits en texte ────────────────────────────────────
+
+
+def _agent_with(*tool_names: str) -> Agent:
+    registry = ToolRegistry()
+    for n in tool_names:
+        tool = _SpotifyTool()
+        tool.name = n  # type: ignore[misc]
+        registry.register(tool)
+    return Agent(settings=settings, llm=_FakeLLM(""), tool_registry=registry)  # type: ignore[arg-type]
+
+
+def test_parser_extracts_name_and_args() -> None:
+    agent = _agent_with("spotify_control")
+    calls = agent.extract_text_tool_calls('[CF] spotify_control(action="pause")')
+
+    assert len(calls) == 1
+    _id, name, args = calls[0]
+    assert name == "spotify_control"
+    assert args == {"action": "pause"}
+
+
+def test_parser_handles_nested_quotes_from_static_prompt() -> None:
+    """Exemple littéral du prompt statique : guillemets simples DANS des doubles."""
+    agent = _agent_with("execute_cli")
+    calls = agent.extract_text_tool_calls('execute_cli(command="open -a \'Safari\'")')
+
+    assert calls[0][2] == {"command": "open -a 'Safari'"}
+
+
+def test_parser_handles_parens_inside_string() -> None:
+    """Un `)` dans la chaîne ne doit pas fermer l'appel prématurément."""
+    agent = _agent_with("execute_cli")
+    calls = agent.extract_text_tool_calls(
+        "execute_cli(command=\"yt-dlp -o '%(title)s.%(ext)s' URL\")"
+    )
+
+    assert calls[0][2]["command"] == "yt-dlp -o '%(title)s.%(ext)s' URL"
+
+
+def test_parser_handles_multiple_args_and_types() -> None:
+    agent = _agent_with("show_view")
+    calls = agent.extract_text_tool_calls('show_view(action="show", view_id="clock")')
+
+    assert calls[0][2] == {"action": "show", "view_id": "clock"}
+
+
+def test_parser_extracts_several_calls_in_order() -> None:
+    agent = _agent_with("spotify_control", "show_view")
+    calls = agent.extract_text_tool_calls(
+        'D\'abord show_view(action="show") puis spotify_control(action="pause")'
+    )
+
+    assert [n for _, n, _ in calls] == ["show_view", "spotify_control"]
+
+
+def test_parser_ignores_unregistered_and_prose() -> None:
+    agent = _agent_with("spotify_control")
+
+    assert agent.extract_text_tool_calls("print(x) et execute_cli(command='ls')") == []
+    assert agent.extract_text_tool_calls("spotify_control est un outil") == []
+    assert agent.extract_text_tool_calls("") == []
+
+
+def test_parser_ignores_unterminated_call() -> None:
+    """Sortie tronquée : parenthèse jamais refermée -> on n'exécute rien."""
+    agent = _agent_with("spotify_control")
+
+    assert agent.extract_text_tool_calls('spotify_control(action="pau') == []

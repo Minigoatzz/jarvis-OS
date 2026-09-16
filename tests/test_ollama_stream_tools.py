@@ -260,3 +260,82 @@ def test_num_ctx_is_configurable_from_env() -> None:
     from jarvis.kernel.settings import Settings
 
     assert "ollama_num_ctx" in Settings.model_fields
+
+
+# ── Aplatissement des blocs Anthropic (le 400 de la synthèse) ───────────────
+
+
+def test_flatten_turns_anthropic_blocks_into_string() -> None:
+    """Agent.synthesize() envoie des blocs ; Ollama exige une chaîne (sinon 400)."""
+    from jarvis.providers.llm.local import _flatten_content
+
+    blocks = [
+        {"type": "text", "text": "Je mets en pause."},
+        {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "spotify_control",
+            "input": {"action": "pause"},
+        },
+    ]
+    out = _flatten_content(blocks)
+
+    assert isinstance(out, str)
+    assert "Je mets en pause." in out
+    assert "spotify_control" in out
+    assert "pause" in out
+
+
+def test_flatten_keeps_tool_results_readable() -> None:
+    from jarvis.providers.llm.local import _flatten_content
+
+    out = _flatten_content(
+        [{"type": "tool_result", "tool_use_id": "t1", "content": "Spotify : pause OK."}]
+    )
+
+    assert "Spotify : pause OK." in out
+
+
+def test_flatten_leaves_plain_strings_untouched() -> None:
+    from jarvis.providers.llm.local import _flatten_content
+
+    assert _flatten_content("déjà du texte") == "déjà du texte"
+
+
+@pytest.mark.asyncio
+async def test_payload_never_sends_list_content_to_ollama() -> None:
+    """Le bug réel : après exécution de l'outil, la synthèse partait avec un
+    `content` en liste et Ollama répondait 400 — l'outil agissait, puis
+    l'utilisateur voyait « j'ai eu un souci »."""
+    provider = _provider()
+    synth_messages = [
+        {"role": "user", "content": "pause ma musique"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "ok"},
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "spotify_control",
+                    "input": {"action": "pause"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "pause OK"}
+            ],
+        },
+    ]
+    client = _FakeClient(_FakeStreamResponse([_chunk(content="C'est en pause.", done=True)]))
+
+    with patch("jarvis.providers.llm.local.httpx.AsyncClient", return_value=client):
+        stream, _ = provider.stream_with_capture(messages=synth_messages, system="sys")
+        await _drain(stream)
+
+    for message in client.sent_payloads[0]["messages"]:
+        assert isinstance(message["content"], str), (
+            f"content non-str envoyé à Ollama -> 400 : {message['content']!r}"
+        )

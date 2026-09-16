@@ -26,6 +26,50 @@ def _strip_think(text: str) -> str:
     return _THINK_RE.sub("", text).lstrip()
 
 
+def _flatten_content(content: object) -> str:
+    """Aplatit un contenu en blocs (format Anthropic) en texte pour Ollama.
+
+    Agent.synthesize() construit le second appel au format Anthropic : `content`
+    est une LISTE de blocs (`text`, `tool_use`, `tool_result`). L'API Ollama
+    exige une CHAÎNE et répond 400 Bad Request sur une liste. Ce chemin n'avait
+    jamais été exercé en local — aucun outil ne s'y exécutait — donc le 400
+    n'est apparu qu'une fois les outils enfin fonctionnels : l'outil agissait,
+    puis la synthèse plantait et l'utilisateur voyait « j'ai eu un souci ».
+
+    Les blocs sont rendus en texte étiqueté pour que le modèle garde
+    l'information dont il a besoin afin de rédiger sa réponse finale.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            parts.append(str(block.get("text", "")))
+        elif btype == "tool_use":
+            args = json.dumps(block.get("input", {}), ensure_ascii=False)
+            parts.append(f"[outil appelé] {block.get('name', '?')}({args})")
+        elif btype == "tool_result":
+            parts.append(f"[résultat outil] {block.get('content', '')}")
+        elif "text" in block:
+            parts.append(str(block["text"]))
+    return "\n".join(p for p in parts if p)
+
+
+def _normalize_message(message: dict) -> dict:
+    """Garantit un `content` de type str — seul format accepté par /api/chat."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return message
+    return {**message, "content": _flatten_content(content)}
+
+
 def _parse_ollama_tool_calls(
     raw_tool_calls: list[dict], id_hint: str
 ) -> list[tuple[str, str, dict]]:
@@ -108,7 +152,10 @@ class OllamaProvider(LLMProvider):
     ) -> dict:
         payload: dict = {
             "model": self._model,
-            "messages": [{"role": "system", "content": system}, *messages],
+            "messages": [
+                {"role": "system", "content": system},
+                *(_normalize_message(m) for m in messages),
+            ],
             "stream": stream,
             "think": False,  # désactive le mode reasoning Qwen3 côté Ollama
             "options": {"temperature": 0.7, "num_ctx": settings.ollama_num_ctx},
@@ -154,11 +201,11 @@ class OllamaProvider(LLMProvider):
                 fallback = {k: v for k, v in payload.items() if k != "think"}
                 return await client.post(f"{self._base_url}/api/chat", json=fallback)
 
+            # Corps inliné dans le message : le format loguru du projet n'affiche
+            # pas les kwargs, et l'erreur réelle d'Ollama y était donc invisible.
             logger.error(
-                "Ollama /api/chat error",
-                status=exc.response.status_code,
-                model=self._model,
-                body=body_text[:500],
+                f"Ollama /api/chat error — status={exc.response.status_code} "
+                f"model={self._model} body={body_text[:500]}"
             )
 
         return response
@@ -249,10 +296,9 @@ class OllamaProvider(LLMProvider):
                             )
                             continue
                         logger.error(
-                            "Ollama /api/chat error (stream)",
-                            status=exc.response.status_code,
-                            model=self._model,
-                            body=body_text[:500],
+                            f"Ollama /api/chat error (stream) — "
+                            f"status={exc.response.status_code} model={self._model} "
+                            f"body={body_text[:500]}"
                         )
                         raise
 
@@ -327,7 +373,10 @@ class OllamaProvider(LLMProvider):
         """
         tool_names = {t["name"] for t in tools}
         ollama_tools = _claude_tools_to_ollama(tools)
-        current: list[dict] = [{"role": "system", "content": system}, *messages]
+        current: list[dict] = [
+            {"role": "system", "content": system},
+            *(_normalize_message(m) for m in messages),
+        ]
 
         async def _exec_one(call_id: str, name: str, args: dict) -> tuple[str, str]:
             if name not in tool_names:

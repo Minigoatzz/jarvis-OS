@@ -28,6 +28,71 @@ _STATIC_PROMPT_PATH = PROMPTS_DIR / "system_static.md"
 _MAX_TOOL_RESULT_CHARS = 12_000
 
 
+def _scan_balanced_parens(text: str, open_idx: int) -> str | None:
+    """Retourne le contenu entre la parenthèse ouvrante et sa fermante.
+
+    Suit l'état des guillemets : `execute_cli(command="open -a 'Safari'")` contient
+    des apostrophes imbriquées, et une parenthèse peut apparaître dans une chaîne.
+    Retourne None si la parenthèse n'est jamais refermée (sortie tronquée).
+    """
+    depth = 0
+    quote: str | None = None
+    for i in range(open_idx, len(text)):
+        ch = text[i]
+        if quote is not None:
+            if ch == "\\":  # échappement : saute le caractère suivant
+                continue
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1 : i]
+    return None
+
+
+_ARG_RE = re.compile(
+    r"""(\w+)\s*=\s*(   "(?:[^"\\]|\\.)*"      # chaîne entre guillemets doubles
+                      | '(?:[^'\\]|\\.)*'      # chaîne entre guillemets simples
+                      | [^,]+                  # nombre, booléen, mot nu
+                    )""",
+    re.VERBOSE,
+)
+
+
+def _coerce_arg(raw: str) -> object:
+    """Convertit une valeur d'argument textuelle en type Python."""
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1].replace('\\"', '"').replace("\\'", "'")
+    low = value.lower()
+    if low in ("true", "vrai"):
+        return True
+    if low in ("false", "faux"):
+        return False
+    if low in ("none", "null"):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return value
+
+
+def _parse_call_args(args_raw: str) -> dict:
+    """Parse `action="pause", level=50` en {"action": "pause", "level": 50}."""
+    return {m.group(1): _coerce_arg(m.group(2)) for m in _ARG_RE.finditer(args_raw)}
+
+
 def _clip_tool_result(text: str) -> str:
     if len(text) <= _MAX_TOOL_RESULT_CHARS:
         return text
@@ -199,26 +264,50 @@ class Agent:
             and self._llm.supports_tools
         )
 
-    def mentions_tool_call_in_text(self, text: str) -> bool:
-        """Détecte un appel d'outil écrit EN TEXTE au lieu d'être émis nativement.
+    def extract_text_tool_calls(self, text: str) -> list[tuple[str, str, dict]]:
+        """Extrait les appels d'outils ÉCRITS EN TEXTE, au format du prompt statique.
 
-        Ex. : `spotify_control(action="pause")` dans le corps de la réponse. Les
-        modèles locaux recopient cette notation depuis les exemples du prompt
-        statique ; le gateway n'exécutant que les tool_calls natifs, la demande
-        était perdue — l'utilisateur voyait la ligne et rien ne se passait.
+        Le prompt statique définit déjà ce format — c'est son contrat, illustré
+        par des exemples comme `execute_cli(command="open -a 'Safari'")` ou
+        `memory_load_topic(filename="...")`. Claude l'interprète comme une
+        intention et appelle nativement ; un modèle local le prend au pied de la
+        lettre et écrit littéralement l'appel. Personne n'avait écrit l'analyseur
+        de ce format : la ligne s'affichait dans la conversation et rien ne
+        s'exécutait (confirmé en usage réel avec qwen3:14b, qui ne renvoie aucun
+        tool_calls natif même en non-streaming avec les schémas dans le payload).
 
-        Ne matche QUE des noms d'outils réellement enregistrés suivis d'une
-        parenthèse : une réponse qui parle de musique ou cite une fonction
-        inexistante ne déclenche rien. Sert de repli au tag [CF], qu'un modèle
-        local n'émet pas toujours.
+        Cette fonction rend donc au format texte le statut d'un vrai transport
+        d'appel, à égalité avec les tool_calls natifs. Sécurité : seuls les noms
+        d'outils RÉELLEMENT enregistrés sont reconnus, et les arguments sont
+        passés au ToolRegistry qui les valide comme n'importe quel appel — rien
+        n'est évalué comme du code.
+
+        Retourne des tuples (id, nom, arguments) — même forme que ToolCapture.calls.
         """
         if self._tool_registry is None or not text.strip():
-            return False
-        for schema in self._tool_registry.schemas():
-            name = str(schema.get("name", ""))
-            if name and re.search(rf"\b{re.escape(name)}\s*\(", text):
-                return True
-        return False
+            return []
+
+        names = [str(s.get("name", "")) for s in self._tool_registry.schemas()]
+        found: list[tuple[int, str, dict]] = []
+
+        for name in names:
+            if not name:
+                continue
+            for match in re.finditer(rf"\b{re.escape(name)}\s*\(", text):
+                args_raw = _scan_balanced_parens(text, match.end() - 1)
+                if args_raw is None:
+                    continue
+                found.append((match.start(), name, _parse_call_args(args_raw)))
+
+        # Ordre d'apparition dans le texte — un modèle peut en écrire plusieurs.
+        found.sort(key=lambda item: item[0])
+        return [
+            (f"text_{name}_{i}", name, args) for i, (_pos, name, args) in enumerate(found)
+        ]
+
+    def mentions_tool_call_in_text(self, text: str) -> bool:
+        """True si le texte contient au moins un appel d'outil écrit en toutes lettres."""
+        return bool(self.extract_text_tool_calls(text))
 
     async def respond(
         self,
