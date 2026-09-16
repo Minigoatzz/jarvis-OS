@@ -187,6 +187,11 @@ class OllamaProvider(LLMProvider):
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            # jrv: volontairement sans collector — soit on retente sans "think"
+            # (repli nominal, pas un incident), soit on journalise et l'appelant
+            # relaie l'exception, qui reçoit son code en amont (JRV-LLM-002 via
+            # tool_loop, JRV-GWY-001 via le gateway). Émettre ici compterait
+            # chaque échec deux fois dans le rapport d'erreurs.
             body_text = exc.response.text
             if (
                 exc.response.status_code == 400
@@ -284,6 +289,8 @@ class OllamaProvider(LLMProvider):
                     try:
                         resp.raise_for_status()
                     except httpx.HTTPStatusError as exc:
+                        # jrv: même raison que dans _post_chat — repli "think"
+                        # ou re-raise vers l'appelant, qui code l'erreur.
                         await resp.aread()
                         body_text = resp.text
                         if not is_last and exc.response.status_code == 400 and (

@@ -80,10 +80,14 @@ def _coerce_arg(raw: str) -> object:
     try:
         return int(value)
     except ValueError:
+        # jrv: sondage de type, pas une panne — une valeur non entière est le cas
+        # nominal ici. Émettre un code d'erreur ferait du bruit à chaque argument
+        # textuel. Volontairement non mappé (scripts/error_audit/scan.py).
         pass
     try:
         return float(value)
     except ValueError:
+        # jrv: idem, sondage de type (voir ci-dessus).
         pass
     return value
 
