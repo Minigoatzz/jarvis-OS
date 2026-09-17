@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -37,15 +38,20 @@ def _scan_balanced_parens(text: str, open_idx: int) -> str | None:
     """
     depth = 0
     quote: str | None = None
-    for i in range(open_idx, len(text)):
+    i = open_idx
+    while i < len(text):
         ch = text[i]
         if quote is not None:
-            if ch == "\\":  # échappement : saute le caractère suivant
+            if ch == "\\":
+                # Saute VRAIMENT le caractère échappé. Sans le +2, le guillemet
+                # de `command="osascript -e 'tell application \"Spotify\" ...'"`
+                # refermait la chaîne trop tôt et les arguments partaient en
+                # morceaux — sortie réellement produite par qwen3:14b.
+                i += 2
                 continue
             if ch == quote:
                 quote = None
-            continue
-        if ch in "\"'":
+        elif ch in "\"'":
             quote = ch
         elif ch == "(":
             depth += 1
@@ -53,6 +59,36 @@ def _scan_balanced_parens(text: str, open_idx: int) -> str | None:
             depth -= 1
             if depth == 0:
                 return text[open_idx + 1 : i]
+        i += 1
+    return None
+
+
+def _scan_balanced_braces(text: str, open_idx: int) -> str | None:
+    """Retourne l'objet JSON complet, accolades comprises, depuis `open_idx`.
+
+    Même logique que _scan_balanced_parens : une accolade dans une chaîne ne
+    compte pas. Retourne None si l'objet n'est jamais refermé.
+    """
+    depth = 0
+    quote: str | None = None
+    i = open_idx
+    while i < len(text):
+        ch = text[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch == '"':
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx : i + 1]
+        i += 1
     return None
 
 
@@ -268,50 +304,124 @@ class Agent:
             and self._llm.supports_tools
         )
 
-    def extract_text_tool_calls(self, text: str) -> list[tuple[str, str, dict]]:
-        """Extrait les appels d'outils ÉCRITS EN TEXTE, au format du prompt statique.
+    def _find_text_tool_calls(self, text: str) -> list[tuple[int, int, str, dict]]:
+        """Localise les appels d'outils ÉCRITS EN TEXTE — (début, fin, nom, args).
 
-        Le prompt statique définit déjà ce format — c'est son contrat, illustré
-        par des exemples comme `execute_cli(command="open -a 'Safari'")` ou
-        `memory_load_topic(filename="...")`. Claude l'interprète comme une
-        intention et appelle nativement ; un modèle local le prend au pied de la
-        lettre et écrit littéralement l'appel. Personne n'avait écrit l'analyseur
-        de ce format : la ligne s'affichait dans la conversation et rien ne
-        s'exécutait (confirmé en usage réel avec qwen3:14b, qui ne renvoie aucun
-        tool_calls natif même en non-streaming avec les schémas dans le payload).
+        Le prompt statique définit lui-même ce format, illustré par des exemples
+        comme `execute_cli(command="open -a 'Safari'")`. Claude les lit comme une
+        intention et appelle nativement ; un modèle local les prend au pied de la
+        lettre et écrit littéralement l'appel. La ligne s'affichait alors dans la
+        conversation et rien ne s'exécutait.
 
-        Cette fonction rend donc au format texte le statut d'un vrai transport
-        d'appel, à égalité avec les tool_calls natifs. Sécurité : seuls les noms
-        d'outils RÉELLEMENT enregistrés sont reconnus, et les arguments sont
-        passés au ToolRegistry qui les valide comme n'importe quel appel — rien
-        n'est évalué comme du code.
+        DEUX notations sont observées, sur le même prompt et le même modèle :
+          - appel de fonction : spotify_control(action="pause")
+          - objet JSON        : {"name": "spotify_control", "arguments": {...}}
+        La seconde traversait l'analyseur sans laisser de trace — la demande
+        disparaissait en silence, exactement comme avant l'ajout du repli texte.
 
-        Retourne des tuples (id, nom, arguments) — même forme que ToolCapture.calls.
+        Sécurité : seuls les noms d'outils RÉELLEMENT enregistrés sont reconnus,
+        et les arguments passent par le ToolRegistry qui les valide comme
+        n'importe quel appel — rien n'est évalué comme du code.
         """
         if self._tool_registry is None or not text.strip():
             return []
 
-        names = [str(s.get("name", "")) for s in self._tool_registry.schemas()]
-        found: list[tuple[int, str, dict]] = []
+        names = {str(s.get("name", "")) for s in self._tool_registry.schemas()}
+        names.discard("")
+        if not names:
+            return []
 
+        found: list[tuple[int, int, str, dict]] = []
+
+        # ── Notation appel de fonction ──────────────────────────────────────
         for name in names:
-            if not name:
-                continue
             for match in re.finditer(rf"\b{re.escape(name)}\s*\(", text):
-                args_raw = _scan_balanced_parens(text, match.end() - 1)
+                open_idx = match.end() - 1
+                args_raw = _scan_balanced_parens(text, open_idx)
                 if args_raw is None:
                     continue
-                found.append((match.start(), name, _parse_call_args(args_raw)))
+                stop = open_idx + len(args_raw) + 2  # '(' + contenu + ')'
+                found.append((match.start(), stop, name, _parse_call_args(args_raw)))
 
-        # Ordre d'apparition dans le texte — un modèle peut en écrire plusieurs.
+        # ── Notation JSON ───────────────────────────────────────────────────
+        for brace in re.finditer(r"\{", text):
+            blob = _scan_balanced_braces(text, brace.start())
+            if blob is None:
+                continue
+            try:
+                payload = json.loads(blob)
+            except ValueError:
+                # jrv: la plupart des accolades d'un texte ne sont pas du JSON.
+                # C'est le cas nominal, pas une panne — émettre un code d'erreur
+                # ferait du bruit à chaque accolade. Volontairement non mappé
+                # (scripts/error_audit/scan.py).
+                continue
+            if not isinstance(payload, dict):
+                continue
+            name = payload.get("name")
+            if not isinstance(name, str) or name not in names:
+                continue
+            args = payload.get("arguments")
+            if args is None:
+                args = payload.get("parameters")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    # jrv: arguments illisibles — on garde l'appel, le
+                    # ToolRegistry refusera proprement s'il en manque.
+                    args = {}
+            found.append(
+                (
+                    brace.start(),
+                    brace.start() + len(blob),
+                    name,
+                    args if isinstance(args, dict) else {},
+                )
+            )
+
         found.sort(key=lambda item: item[0])
+
+        # Un appel imbriqué dans un autre (objet JSON dans un objet JSON) ne doit
+        # pas être exécuté deux fois.
+        kept: list[tuple[int, int, str, dict]] = []
+        for span in found:
+            if kept and span[0] < kept[-1][1]:
+                continue
+            kept.append(span)
+        return kept
+
+    def extract_text_tool_calls(self, text: str) -> list[tuple[str, str, dict]]:
+        """Appels écrits en texte, au format de ToolCapture.calls — (id, nom, args)."""
         return [
-            (f"text_{name}_{i}", name, args) for i, (_pos, name, args) in enumerate(found)
+            (f"text_{name}_{i}", name, args)
+            for i, (_start, _stop, name, args) in enumerate(self._find_text_tool_calls(text))
         ]
+
+    def strip_text_tool_calls(self, text: str) -> str:
+        """Retire du texte les appels écrits en toutes lettres.
+
+        Deux usages, tous deux nécessaires :
+          - ce que voit l'utilisateur : il a demandé « dis-moi que tu mets la
+            musique en pause », pas de lire la commande ;
+          - ce qui est rendu au modèle : lui resservir sa propre notation comme
+            étant sa parole l'encourage à recommencer au tour suivant.
+        L'EXÉCUTION, elle, se fait toujours sur le texte intact.
+        """
+        spans = self._find_text_tool_calls(text)
+        if not spans:
+            return text
+        out: list[str] = []
+        pos = 0
+        for start, stop, _name, _args in spans:
+            out.append(text[pos:start])
+            pos = stop
+        out.append(text[pos:])
+        return re.sub(r"[ \t]{2,}", " ", "".join(out)).strip()
 
     def mentions_tool_call_in_text(self, text: str) -> bool:
         """True si le texte contient au moins un appel d'outil écrit en toutes lettres."""
-        return bool(self.extract_text_tool_calls(text))
+        return bool(self._find_text_tool_calls(text))
 
     async def respond(
         self,
@@ -424,8 +534,12 @@ class Agent:
         """
         # Bloc assistant avec le texte d'ack + les tool_use calls
         assistant_content: list[dict] = []
-        if ack_text.strip():
-            assistant_content.append({"type": "text", "text": ack_text})
+        # La notation d'appel est retirée avant de rendre son texte au
+        # modèle : la lui resservir comme étant sa propre parole l'encourage
+        # à réécrire des appels en texte au tour suivant.
+        ack_clean = self.strip_text_tool_calls(ack_text)
+        if ack_clean.strip():
+            assistant_content.append({"type": "text", "text": ack_clean})
         for tool_id, tool_name, tool_input in capture.calls:
             assistant_content.append(
                 {

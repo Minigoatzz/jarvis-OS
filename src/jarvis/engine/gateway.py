@@ -99,10 +99,28 @@ class Gateway:
             async def _pipe() -> AsyncIterator[str]:
                 tool_task: asyncio.Task | None = None
                 ack_text = ""  # Accumule le texte streamé avant les outils
+                held: list[str] = []
+                emitted = False
+
+                # Sur la route CF, l'AFFICHAGE du premier jet est retenu jusqu'à
+                # savoir si des outils vont tourner. Deux symptômes réels, tous
+                # deux constatés avec qwen3:14b :
+                #   - le modèle répond avant l'exécution ("C'est pausé.") et la
+                #     synthèse le redit après : la réponse s'affichait en double ;
+                #   - il écrit l'appel en toutes lettres, et cette ligne partait
+                #     telle quelle dans la conversation.
+                # Le stream reste CONSOMMÉ au fil de l'eau : la task outil démarre
+                # aussi tôt qu'avant, seul l'affichage est différé. Les routes I
+                # et BG ne sont pas concernées et streament token par token.
+                defer = tool_capture is not None and route is RouteEnum.CONFIRM_FIRE
 
                 async for chunk in text_stream:
                     ack_text += chunk
-                    yield chunk
+                    if defer:
+                        held.append(chunk)
+                    else:
+                        emitted = True
+                        yield chunk
                     # Dès que _stream_capturing peuple capture (content_block_stop tool_use),
                     # on démarre la task outil — elle tourne pendant que la voice WS fait du TTS.
                     if tool_task is None and tool_capture is not None and tool_capture.calls:
@@ -124,7 +142,7 @@ class Gateway:
                 # ne renvoie AUCUN tool_calls natif, même en non-streaming avec les
                 # schémas dans le payload. On analyse donc le texte et on peuple la
                 # même ToolCapture : le reste du flux (exécution parallèle puis
-                # synthèse) est stricement identique au chemin natif.
+                # synthèse) est strictement identique au chemin natif.
                 #
                 # Un repli par tool_loop() a été essayé ici et retiré : il repose sur
                 # le même function calling natif qui ne répond pas, et se contentait
@@ -144,26 +162,32 @@ class Gateway:
                             name="cf-tools-text",
                         )
 
+                # Aucun outil : le premier jet EST la réponse. On le rend tel quel,
+                # débarrassé d'une éventuelle notation d'appel restée sans suite.
+                if tool_task is None:
+                    if held:
+                        yield agent.strip_text_tool_calls("".join(held))
+                    return
+
                 # Second appel LLM pour synthétiser les résultats — avant "done"
-                if tool_task is not None:
-                    try:
-                        results = await tool_task
-                        logger.debug("CF tools done", names=[n for _, n, _ in tool_capture.calls])
-                        if ack_text.strip():
-                            yield " "
-                        synth_stream = agent.synthesize(session, ack_text, tool_capture, results)
-                        _, clean_synth = await SpeedRouter.extract_route(synth_stream)
-                        async for chunk in clean_synth:
-                            yield chunk
-                    except Exception as e:
-                        collector.error("JRV-GWY-001", "JRV-GWY-001", cause=e)
-                        logger.opt(exception=True).error(
-                            "CF tool or synthesize error",
-                            error=type(e).__name__,
-                            detail=str(e),
-                        )
-                        notifications.add(f"Outil échoué : {e}")
-                        yield friendly_llm_error(e)
+                try:
+                    results = await tool_task
+                    logger.debug("CF tools done", names=[n for _, n, _ in tool_capture.calls])
+                    if emitted and ack_text.strip():
+                        yield " "
+                    synth_stream = agent.synthesize(session, ack_text, tool_capture, results)
+                    _, clean_synth = await SpeedRouter.extract_route(synth_stream)
+                    async for chunk in clean_synth:
+                        yield chunk
+                except Exception as e:
+                    collector.error("JRV-GWY-001", "JRV-GWY-001", cause=e)
+                    logger.opt(exception=True).error(
+                        "CF tool or synthesize error",
+                        error=type(e).__name__,
+                        detail=str(e),
+                    )
+                    notifications.add(f"Outil échoué : {e}")
+                    yield friendly_llm_error(e)
 
             return await self._finalize(session, route, _pipe(), stream)
 
