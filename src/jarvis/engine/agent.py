@@ -28,6 +28,22 @@ from jarvis.kernel.settings import Settings
 _STATIC_PROMPT_PATH = PROMPTS_DIR / "system_static.md"
 _MAX_TOOL_RESULT_CHARS = 12_000
 
+# ToolRegistry.call() préfixe le contenu d'un outil en échec par son code JRV
+# (_prefix_error_content). C'est le SEUL marqueur d'échec qui survit jusqu'ici :
+# call_str() rend une chaîne, le drapeau is_error de ToolResult ne traverse pas.
+_TOOL_ERROR_RE = re.compile(r"^\[JRV-[A-Z]+-\d+\]")
+
+
+def _is_tool_error(result: str) -> bool:
+    """True si ce résultat d'outil est un échec.
+
+    Sans cette lecture, la synthèse recevait un échec sous la forme exacte d'un
+    succès : « [JRV-TOL-004] Playlist trouvée mais impossible de lancer (404) »
+    n'est que du texte pour le modèle, qui enchaînait « C'est lancé. » pendant
+    que la musique ne bougeait pas.
+    """
+    return bool(_TOOL_ERROR_RE.match(result.strip()))
+
 
 def _scan_balanced_parens(text: str, open_idx: int) -> str | None:
     """Retourne le contenu entre la parenthèse ouvrante et sa fermante.
@@ -550,9 +566,17 @@ class Agent:
                 }
             )
 
-        # Bloc user avec les tool_result
+        # Bloc user avec les tool_result. `is_error` est le signal structuré
+        # attendu par les modèles au format Anthropic ; le préfixe JRV présent
+        # dans le contenu porte la même information pour les providers qui
+        # aplatissent les blocs en texte (Ollama).
         tool_result_blocks = [
-            {"type": "tool_result", "tool_use_id": tid, "content": _clip_tool_result(r)}
+            {
+                "type": "tool_result",
+                "tool_use_id": tid,
+                "content": _clip_tool_result(r),
+                "is_error": _is_tool_error(r),
+            }
             for (tid, _, _), r in zip(capture.calls, results, strict=True)
         ]
 
@@ -562,6 +586,30 @@ class Agent:
         ]
 
         system = self._build_system()
+
+        failures = [
+            (name, result)
+            for (_tid, name, _inp), result in zip(capture.calls, results, strict=True)
+            if _is_tool_error(result)
+        ]
+        if failures:
+            # Journalisé en WARNING : un échec d'outil était jusqu'ici invisible
+            # partout — ni dans les logs de synthèse, ni à l'écran.
+            logger.warning(
+                "Outil en échec avant synthèse",
+                names=[name for name, _ in failures],
+                details=[result[:160] for _, result in failures],
+            )
+            system += (
+                "\n\n## UN OUTIL VIENT D'ÉCHOUER — ne prétends pas le contraire\n\n"
+                "Au moins un résultat ci-dessous est marqué en échec (préfixe "
+                "`[JRV-...]`). L'action demandée N'A PAS EU LIEU. Tu dois :\n"
+                "1. le dire clairement, en une phrase, dans les mots de l'utilisateur ;\n"
+                "2. donner la cause concrète lisible dans le message d'erreur ;\n"
+                "3. ne JAMAIS écrire « c'est lancé », « c'est fait », « voilà » ni "
+                "aucune formule laissant croire que ça a marché."
+            )
+
         logger.debug("Agent synthesizing tool results", tools=[n for _, n, _ in capture.calls])
 
         # Pas de tools ici : le LLM se concentre sur la synthèse, pas de chainage

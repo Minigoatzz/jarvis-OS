@@ -78,6 +78,7 @@ class _FakeLLM:
         self._first = first_pass
         self._synth = synth
         self.seen_synth_messages: list[dict] = []
+        self.seen_synth_system = ""
 
     @property
     def supports_tools(self) -> bool:
@@ -101,6 +102,7 @@ class _FakeLLM:
 
     async def complete(self, *a: object, **k: object) -> AsyncIterator[str]:
         self.seen_synth_messages = list(k.get("messages") or (a[0] if a else []))
+        self.seen_synth_system = str(k.get("system") or "")
         synth = self._synth
 
         async def _gen() -> AsyncIterator[str]:
@@ -366,3 +368,105 @@ async def test_model_is_not_fed_back_its_own_call_notation() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ── L'outil échoue : Jarvis ne doit pas annoncer un succès ──────────────────
+#
+# Symptôme réel : « joue l'album unplugged d'Alice in Chains » -> « C'est lancé. »
+# et la musique ne bouge pas. Spotify rend pourtant une erreur explicite
+# (« Playlist trouvée mais impossible de lancer (404) », typiquement aucun
+# appareil actif). ToolRegistry.call() la préfixe bien de son code JRV, mais la
+# synthèse ne distinguait pas ce texte d'un résultat normal.
+
+
+class _FailingSpotify(Tool):
+    name = "spotify_control"
+    description = "Contrôle la lecture Spotify (pause, play, next)."
+    input_schema = {
+        "type": "object",
+        "properties": {"action": {"type": "string"}, "query": {"type": "string"}},
+        "required": ["action"],
+    }
+
+    async def execute(self, **kwargs: object) -> ToolResult:
+        return ToolResult(
+            content="Playlist trouvée (Unplugged) mais impossible de lancer (404).",
+            is_error=True,
+        )
+
+
+def _gateway_with(tool: Tool, first_pass: str, synth: str) -> tuple[Gateway, _FakeLLM]:
+    registry = ToolRegistry()
+    registry.register(tool)
+    llm = _FakeLLM(first_pass, synth)
+    agent = Agent(settings=settings, llm=llm, tool_registry=registry)  # type: ignore[arg-type]
+    return (
+        Gateway(
+            session_manager=SessionManager(),
+            agent=agent,
+            notifications=NotificationQueue(),
+            worker=None,  # type: ignore[arg-type]
+        ),
+        llm,
+    )
+
+
+def test_jrv_prefix_is_recognised_as_a_failure() -> None:
+    from jarvis.engine.agent import _is_tool_error
+
+    assert _is_tool_error("[JRV-TOL-004] Playlist trouvée mais impossible de lancer (404).")
+    assert not _is_tool_error("Lecture de la playlist « Unplugged ».")
+    assert not _is_tool_error("[INFO] rien à signaler")
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_is_flagged_is_error_in_the_synthesis_blocks() -> None:
+    gateway, llm = _gateway_with(
+        _FailingSpotify(),
+        '[CF] spotify_control(action="search_playlist", query="unplugged alice in chains")',
+        synth="Je n'ai pas pu lancer la playlist.",
+    )
+
+    await _run(gateway, "joue l'album unplugged d'alice in chains")
+
+    blocks = [
+        block
+        for message in llm.seen_synth_messages
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert blocks, "la synthèse doit recevoir un tool_result"
+    assert all(block["is_error"] for block in blocks), "l'échec n'est pas signalé au modèle"
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_adds_a_do_not_claim_success_directive() -> None:
+    gateway, llm = _gateway_with(
+        _FailingSpotify(),
+        '[CF] spotify_control(action="search_playlist", query="unplugged alice in chains")',
+        synth="Je n'ai pas pu lancer la playlist.",
+    )
+
+    await _run(gateway, "joue l'album unplugged d'alice in chains")
+
+    assert "UN OUTIL VIENT D'ÉCHOUER" in llm.seen_synth_system
+    assert "N'A PAS EU LIEU" in llm.seen_synth_system
+
+
+@pytest.mark.asyncio
+async def test_successful_tool_gets_no_failure_directive() -> None:
+    """Non-régression : un succès ne doit pas déclencher le discours d'échec."""
+    gateway, _tool, llm = _gateway(f"[CF] {_CALL_PAREN}", synth="C'est en pause.")
+
+    await _run(gateway, "pause ma musique")
+
+    assert "UN OUTIL VIENT D'ÉCHOUER" not in llm.seen_synth_system
+    blocks = [
+        block
+        for message in llm.seen_synth_messages
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert blocks and not any(block["is_error"] for block in blocks)

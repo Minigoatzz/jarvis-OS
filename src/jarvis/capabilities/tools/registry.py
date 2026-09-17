@@ -111,7 +111,13 @@ class ToolRegistry:
             )
 
     async def call_str(self, name: str, inputs: dict) -> str:
+        """Variante chaîne de call(), pour les exécuteurs d'outils du LLM.
+
+        Le marquage d'échec n'est PAS perdu ici : call() a déjà préfixé le
+        contenu par le code JRV (_prefix_error_content), et c'est ce préfixe que
+        l'aval lit (engine/agent.py::_is_tool_error). L'ancien `if is_error`
+        rendait la même chose dans ses deux branches — il donnait l'illusion
+        d'un traitement d'erreur qui n'existait pas.
+        """
         result = await self.call(name, inputs)
-        if result.is_error:
-            return result.content
         return result.content
