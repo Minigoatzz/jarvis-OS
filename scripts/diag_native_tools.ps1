@@ -1,14 +1,23 @@
 # Diagnostic : le modele local emet-il des tool_calls NATIFS avec ce prompt systeme ?
 #
-# Ablation a une variable. Chaque variante ajoute un ingredient au prompt
-# systeme et on regarde si Ollama renvoie encore message.tool_calls (OUI) ou si
-# l'appel bascule dans le canal texte (NON).
+# Ablation. Chaque variante ajoute un ingredient au prompt systeme et on mesure
+# la PROPORTION d'appels natifs sur N tirages. Le decodage se fait a
+# temperature 0.7 -- la valeur reelle de production -- donc une seule requete par
+# variante ne mesure rien : la campagne du 15/09 a vu la variante F passer de OUI
+# a NON entre deux executions du meme prompt. C'est un taux qu'on cherche, pas un
+# booleen.
+#
+# Conditions alignees sur providers/llm/local.py::_payload :
+#   think = false, temperature = 0.7, num_ctx = settings.ollama_num_ctx (16384).
+# Sans num_ctx explicite, Ollama applique son defaut VRAM (~4096) et TRONQUE le
+# prompt reel de 22 Ko -- les variantes D ne testeraient alors pas ce qu'on croit.
 #
 # Prerequis : ollama serve en cours. Jarvis peut rester eteint.
 #
 # Usage :
 #   .\scripts\diag_native_tools.ps1
 #   .\scripts\diag_native_tools.ps1 -Model qwen2.5:7b -SkipReal
+#   .\scripts\diag_native_tools.ps1 -Runs 10
 #
 #   foreach ($m in "qwen3:14b","qwen2.5:7b","qwen3:8b","mistral:7b") {
 #       .\scripts\diag_native_tools.ps1 -Model $m -SkipReal
@@ -21,68 +30,95 @@
 #   real_noargs.txt  idem, arguments retires (les schemas natifs les portent deja)
 
 param(
-    [string]$Model = "qwen3:14b",
-    [switch]$SkipReal
+    [string]$Model  = "qwen3:14b",
+    [switch]$SkipReal,
+    [int]$Runs      = 5,
+    [int]$NumCtx    = 16384
 )
 
 $ErrorActionPreference = "Stop"
 
 # ConvertTo-Json de PowerShell 5.1 leve "capacity was less than the current size"
-# au-dela d'une certaine taille d'entree -- le prompt reel fait 22 Ko, d'ou le
-# crash de la variante D. On passe donc par le serialiseur .NET sous-jacent en
-# levant sa limite. Bonus : il echappe le non-ASCII en \uXXXX, ce qui supprime
-# toute question d'encodage sur le corps de requete.
+# au-dela d'une certaine taille d'entree -- le prompt reel fait 22 Ko. On passe
+# par le serialiseur .NET sous-jacent en levant sa limite ; il echappe aussi le
+# non-ASCII en \uXXXX, ce qui supprime toute question d'encodage.
 Add-Type -AssemblyName System.Web.Extensions
 $script:Ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
 $script:Ser.MaxJsonLength = [int]::MaxValue
 $script:Ser.RecursionLimit = 200
 
+# Tout ce qui entre dans le corps de requete est caste en [string] : un objet
+# rendu par le pipeline PowerShell arrive enveloppe dans un PSObject, et le
+# serialiseur reflechit alors sur ses membres jusqu'a tomber sur des types
+# Reflection -- d'ou "A circular reference was detected ... RuntimeModule".
 function Invoke-Ablation($label, $sys) {
-    $msgs = @()
-    if ($sys) { $msgs += @{ role = "system"; content = $sys } }
-    $msgs += @{ role = "user"; content = "pause ma musique" }
+    $native = 0
+    $tools  = @{}
+    $misses = @{}
 
-    $body = @{
-        model    = $Model
-        messages = $msgs
-        stream   = $false
-        think    = $false
-        tools    = @(@{
-            type     = "function"
-            function = @{
-                name        = "spotify_control"
-                description = "Controle la lecture Spotify"
-                parameters  = @{
-                    type       = "object"
-                    properties = @{ action = @{ type = "string" } }
-                    required   = @("action")
+    for ($i = 1; $i -le $Runs; $i++) {
+        $msgs = @()
+        if ($sys) { $msgs += @{ role = "system"; content = [string]$sys } }
+        $msgs += @{ role = "user"; content = "pause ma musique" }
+
+        $body = @{
+            model    = [string]$Model
+            messages = $msgs
+            stream   = $false
+            think    = $false
+            options  = @{ temperature = 0.7; num_ctx = $NumCtx }
+            tools    = @(@{
+                type     = "function"
+                function = @{
+                    name        = "spotify_control"
+                    description = "Controle la lecture Spotify"
+                    parameters  = @{
+                        type       = "object"
+                        properties = @{ action = @{ type = "string" } }
+                        required   = @("action")
+                    }
                 }
+            })
+        }
+
+        try {
+            $json  = $script:Ser.Serialize($body)
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+            $r = Invoke-RestMethod -Uri "http://localhost:11434/api/chat" -Method Post `
+                    -Body $bytes -ContentType "application/json; charset=utf-8"
+        } catch {
+            Write-Host ("{0,-44} ERREUR : {1}" -f $label, $_.Exception.Message) -ForegroundColor Red
+            return
+        }
+
+        if ($r.message.tool_calls) {
+            $native++
+            foreach ($tc in $r.message.tool_calls) {
+                $n = [string]$tc.function.name
+                if ($tools.ContainsKey($n)) { $tools[$n]++ } else { $tools[$n] = 1 }
             }
-        })
+        } else {
+            $txt = ([string]$r.message.content -replace "\s+", " ").Trim()
+            if ($txt -eq "")        { $txt = "(reponse vide)" }
+            if ($txt.Length -gt 92) { $txt = $txt.Substring(0, 92) + "..." }
+            if ($misses.ContainsKey($txt)) { $misses[$txt]++ } else { $misses[$txt] = 1 }
+        }
     }
 
-    try {
-        $json  = $script:Ser.Serialize($body)
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-        $r = Invoke-RestMethod -Uri "http://localhost:11434/api/chat" -Method Post `
-                -Body $bytes -ContentType "application/json; charset=utf-8"
-    } catch {
-        Write-Host ("{0,-46} ERREUR : {1}" -f $label, $_.Exception.Message) -ForegroundColor Red
-        return
-    }
+    if ($native -eq $Runs)  { $color = "Green" }
+    elseif ($native -eq 0)  { $color = "Yellow" }
+    else                    { $color = "DarkYellow" }
 
-    if ($r.message.tool_calls) {
-        $names = ($r.message.tool_calls | ForEach-Object { $_.function.name }) -join ", "
-        Write-Host ("{0,-46} TOOL_CALLS: OUI  ({1})" -f $label, $names) -ForegroundColor Green
-    } else {
-        $txt = ($r.message.content -replace "\s+", " ").Trim()
-        if ($txt.Length -gt 100) { $txt = $txt.Substring(0, 100) + "..." }
-        Write-Host ("{0,-46} TOOL_CALLS: NON" -f $label) -ForegroundColor Yellow
-        Write-Host ("{0,-46}   -> {1}" -f "", $txt) -ForegroundColor DarkGray
+    $names = ($tools.Keys | Sort-Object) -join ", "
+    if ($names) { $names = "  ($names)" }
+    Write-Host ("{0,-44} natif {1}/{2}{3}" -f $label, $native, $Runs, $names) -ForegroundColor $color
+
+    foreach ($k in ($misses.Keys | Sort-Object { -$misses[$_] })) {
+        Write-Host ("{0,-44}   x{1} -> {2}" -f "", $misses[$k], $k) -ForegroundColor DarkGray
     }
 }
 
-# --- Variantes synthetiques (inchangees depuis la derniere campagne) ---------
+# --- Variantes synthetiques (inchangees depuis la premiere campagne) ---------
 
 $tag = "Tu es Jarvis. REGLE ABSOLUE : commence TOUJOURS ta reponse par un tag de routing [I], [CF] ou [BG]."
 
@@ -134,24 +170,26 @@ $promptDir = Join-Path $PSScriptRoot "diag_prompts"
 function Invoke-RealVariant($label, $file) {
     $path = Join-Path $promptDir $file
     if (-not (Test-Path $path)) {
-        Write-Host ("{0,-46} INTROUVABLE : {1}" -f $label, $path) -ForegroundColor Red
+        Write-Host ("{0,-44} INTROUVABLE : {1}" -f $label, $path) -ForegroundColor Red
         return
     }
-    Invoke-Ablation $label (Get-Content $path -Raw -Encoding UTF8)
+    # ReadAllText rend une String .NET nue, pas un PSObject (cf. note plus haut).
+    Invoke-Ablation $label ([System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8))
 }
 
 # --- Campagne ---------------------------------------------------------------
 
 Write-Host ""
 Write-Host ("  Ablation - tool_calls natifs ({0})" -f $Model) -ForegroundColor Cyan
+Write-Host ("  {0} tirages par variante, temperature 0.7, num_ctx {1}" -f $Runs, $NumCtx) -ForegroundColor DarkGray
 Write-Host ""
 
-Invoke-Ablation "A  aucun prompt systeme (temoin)"        $null
-Invoke-Ablation "B  regle du tag seule"                   $tag
-Invoke-Ablation "C  tag + exemples en notation texte"     $examples
-Invoke-Ablation "E  C + contre-instruction"               $counter
-Invoke-Ablation "F  tag + exemples sans notation"         $noNotation
-Invoke-Ablation "G  tag + menu d'outils, zero exemple"    $menu
+Invoke-Ablation "A  aucun prompt systeme (temoin)"      $null
+Invoke-Ablation "B  regle du tag seule"                 $tag
+Invoke-Ablation "C  tag + exemples en notation texte"   $examples
+Invoke-Ablation "E  C + contre-instruction"             $counter
+Invoke-Ablation "F  tag + exemples sans notation"       $noNotation
+Invoke-Ablation "G  tag + menu d'outils, zero exemple"  $menu
 
 if (-not $SkipReal) {
     Write-Host ""
@@ -161,6 +199,5 @@ if (-not $SkipReal) {
 }
 
 Write-Host ""
-Write-Host "  C vs F : meme contenu, seule la notation change." -ForegroundColor DarkGray
-Write-Host "  D vs D2/D3 : est-ce que le correctif tient sur le vrai prompt ?" -ForegroundColor DarkGray
+Write-Host "  Lecture : c'est l'ECART entre taux qui compte, pas un OUI/NON isole." -ForegroundColor DarkGray
 Write-Host ""
