@@ -42,6 +42,7 @@ from jarvis.capabilities.tools.capability import ReportMissingCapabilityTool
 from jarvis.capabilities.tools.cli import CLIRunnerTool, ExecuteCLITool
 from jarvis.capabilities.tools.filesystem import FindFilesTool, ReadFileTool
 from jarvis.capabilities.tools.gmail import GmailListTool, send_gmail_draft
+from jarvis.capabilities.tools.map_control import MapControlTool
 from jarvis.capabilities.tools.memory import (
     CrossSessionRecallTool,
     MemoryLoadTopicTool,
@@ -320,8 +321,20 @@ def build(
     notifications = NotificationQueue()
     proactive_queue = ProactiveQueue()
 
-    # ShowViewTool dépend de proactive_queue, donc enregistré après.
-    tool_registry.register(ShowViewTool(broadcast_event=proactive_queue.broadcast_event))
+    # ShowViewTool et MapControlTool dépendent de proactive_queue, donc
+    # enregistrés après.
+    #
+    # MapControlTool manquait : l'outil est implémenté (capabilities/tools/
+    # map_control.py) et documenté sur six lignes du prompt statique
+    # (« Montre-moi Lyon » -> map_control(action="fly_to", ...)), mais il
+    # n'était jamais enregistré. Le modèle écrivait donc un appel vers un
+    # outil inconnu du registre : l'analyseur de texte du gateway ne
+    # reconnaît que les noms RÉELLEMENT enregistrés, la ligne était ignorée
+    # sans erreur, et la skill-vue globe restait affichable mais impilotable.
+    tool_registry.register(
+        ShowViewTool(broadcast_event=proactive_queue.broadcast_event),
+        MapControlTool(broadcast_event=proactive_queue.broadcast_event),
+    )
 
     budget = BudgetGuard(
         settings=settings,

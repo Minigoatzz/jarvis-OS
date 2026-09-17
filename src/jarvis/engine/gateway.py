@@ -102,17 +102,27 @@ class Gateway:
                 held: list[str] = []
                 emitted = False
 
-                # Sur la route CF, l'AFFICHAGE du premier jet est retenu jusqu'à
-                # savoir si des outils vont tourner. Deux symptômes réels, tous
-                # deux constatés avec qwen3:14b :
-                #   - le modèle répond avant l'exécution ("C'est pausé.") et la
-                #     synthèse le redit après : la réponse s'affichait en double ;
+                # L'AFFICHAGE du premier jet est retenu jusqu'à savoir si des
+                # outils vont tourner. Deux symptômes réels, tous deux constatés
+                # avec qwen3:14b :
+                #   - le modèle répond avant l'exécution ("C'est fait.") et la
+                #     synthèse le redit après : la réponse s'affichait en double,
+                #     parfois en quadruple ;
                 #   - il écrit l'appel en toutes lettres, et cette ligne partait
                 #     telle quelle dans la conversation.
+                #
+                # La condition a d'abord été limitée à la route CF. C'était faux :
+                # le modèle écrit l'appel ET tague [I] (« joue holyman par blind
+                # melon » -> [I] + spotify_control(...)). Le tag est une intention
+                # déclarée par le modèle, pas un fait ; on ne peut pas s'en servir
+                # pour décider s'il y aura un outil. On retient donc dès que le
+                # provider peut capturer des outils, et on libère le texte si
+                # aucun n'a tourné.
+                #
                 # Le stream reste CONSOMMÉ au fil de l'eau : la task outil démarre
-                # aussi tôt qu'avant, seul l'affichage est différé. Les routes I
-                # et BG ne sont pas concernées et streament token par token.
-                defer = tool_capture is not None and route is RouteEnum.CONFIRM_FIRE
+                # aussi tôt qu'avant, seul l'affichage est différé — d'au plus la
+                # durée du premier jet, qu'on attendait déjà avant la synthèse.
+                defer = tool_capture is not None
 
                 async for chunk in text_stream:
                     ack_text += chunk

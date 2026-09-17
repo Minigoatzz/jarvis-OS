@@ -562,3 +562,56 @@ def test_local_prompt_no_longer_forbids_writing_the_call() -> None:
     assert "N'écris JAMAIS l'appel en texte" not in system
     assert "ÉCRIS l'appel" in system
     assert 'spotify_control(action="pause")' in system
+
+
+# ── Le tag de routing ne décide PAS s'il y aura un outil ────────────────────
+#
+# Capture du 16/09 : « joue holyman par blind melon » -> le modèle écrit
+# spotify_control(action="search_track", ...) mais tague [I]. La rétention était
+# conditionnée à [CF], donc l'appel partait en clair et la synthèse s'empilait
+# par-dessus : quatre affirmations pour une action.
+
+
+@pytest.mark.asyncio
+async def test_instant_route_with_a_written_call_still_hides_it() -> None:
+    gateway, tool, _llm = _gateway(
+        '[I] spotify_control(action="pause") C\'est fait.',
+        synth="La musique est en pause.",
+    )
+
+    out = await _run(gateway, "pause la musique")
+
+    assert tool.calls == [{"action": "pause"}], "l'outil doit s'exécuter"
+    assert "spotify_control(" not in out, "l'appel ne doit jamais s'afficher"
+    assert "C'est fait." not in out, "le premier jet ne doit pas s'ajouter à la synthèse"
+    assert out.strip() == "La musique est en pause."
+
+
+@pytest.mark.asyncio
+async def test_no_route_tag_at_all_with_a_written_call() -> None:
+    """Un modèle local omet parfois le tag : la rétention doit tenir quand même."""
+    gateway, tool, _llm = _gateway(
+        'Je lance ça. spotify_control(action="play")', synth="La musique reprend."
+    )
+
+    out = await _run(gateway, "play la musique")
+
+    assert tool.calls == [{"action": "play"}]
+    assert "spotify_control(" not in out
+    assert out.strip() == "La musique reprend."
+
+
+@pytest.mark.asyncio
+async def test_a_single_answer_reaches_the_user_per_tool_turn() -> None:
+    """Compte dur : une action, une phrase. Le symptôme était « 4 réponses »."""
+    gateway, _tool, _llm = _gateway(
+        '[I] spotify_control(action="search_track", query="holyman blind melon") '
+        "C'est lancé. Je cherche et je joue. C'est fait.",
+        synth="« Holyman » par Blind Melon joue maintenant.",
+    )
+
+    out = await _run(gateway, "joue holyman par blind melon")
+
+    assert out.count("C'est fait.") == 0
+    assert out.count("C'est lancé.") == 0
+    assert out.strip() == "« Holyman » par Blind Melon joue maintenant."
