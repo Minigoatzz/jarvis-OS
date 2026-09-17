@@ -470,3 +470,95 @@ async def test_successful_tool_gets_no_failure_directive() -> None:
         if isinstance(block, dict) and block.get("type") == "tool_result"
     ]
     assert blocks and not any(block["is_error"] for block in blocks)
+
+
+# ── Le modèle n'écrit AUCUN appel : relance en prompt minimal ───────────────
+#
+# Symptôme réel, capture du 16/09 : « pause ma musique » -> « C'est lancé. »,
+# « pause la musique » -> « C'est fait. », musique toujours en lecture. Aucun
+# appel écrit, aucun appel natif — donc aucun outil, et une réponse qui affirme
+# le contraire. Cause : le prompt local interdisait explicitement d'écrire
+# l'appel en texte, alors que c'est le SEUL transport qui fonctionne ici.
+
+
+class _RetryingLLM(_FakeLLM):
+    """Premier jet sans aucun appel ; la relance minimale en produit un."""
+
+    def __init__(self, first_pass: str, forced: str, synth: str) -> None:
+        super().__init__(first_pass, synth)
+        self._forced = forced
+        self.forced_systems: list[str] = []
+
+    async def complete(self, *a: object, **k: object) -> AsyncIterator[str] | str:
+        # stream=False => c'est la relance minimale (force_tool_call)
+        if k.get("stream") is False:
+            self.forced_systems.append(str(k.get("system") or ""))
+            return self._forced
+        return await super().complete(*a, **k)
+
+
+@pytest.mark.asyncio
+async def test_cf_without_any_call_is_retried_with_a_minimal_prompt() -> None:
+    tool = _SpotifyTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    llm = _RetryingLLM("[CF] C'est fait.", _CALL_PAREN, "C'est en pause.")
+    agent = Agent(settings=settings, llm=llm, tool_registry=registry)  # type: ignore[arg-type]
+    gateway = Gateway(
+        session_manager=SessionManager(),
+        agent=agent,
+        notifications=NotificationQueue(),
+        worker=None,  # type: ignore[arg-type]
+    )
+
+    out = await _run(gateway, "pause ma musique")
+
+    assert tool.calls == [{"action": "pause"}], "la relance n'a pas déclenché l'outil"
+    assert llm.forced_systems, "force_tool_call n'a pas été appelé"
+    assert "AUCUN" in llm.forced_systems[0], "le prompt minimal doit offrir une sortie"
+    assert "C'est fait." not in out, "le mensonge du premier jet ne doit pas sortir"
+    assert "C'est en pause." in out
+
+
+@pytest.mark.asyncio
+async def test_retry_returning_nothing_keeps_the_first_pass() -> None:
+    """Si la relance ne trouve aucun outil, on garde la réponse d'origine."""
+    tool = _SpotifyTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    llm = _RetryingLLM("[CF] Aucun lecteur actif détecté.", "AUCUN", "(jamais)")
+    agent = Agent(settings=settings, llm=llm, tool_registry=registry)  # type: ignore[arg-type]
+    gateway = Gateway(
+        session_manager=SessionManager(),
+        agent=agent,
+        notifications=NotificationQueue(),
+        worker=None,  # type: ignore[arg-type]
+    )
+
+    out = await _run(gateway, "pause ma musique")
+
+    assert tool.calls == []
+    assert "Aucun lecteur actif détecté." in out
+
+
+def test_local_prompt_no_longer_forbids_writing_the_call() -> None:
+    """Non-régression sur la cause racine : plus d'interdiction d'écrire l'appel.
+
+    La contre-instruction correspondait à la variante E de l'ablation, mesurée
+    NON à chaque tirage : elle supprimait le transport texte sans jamais obtenir
+    d'appel natif en échange.
+    """
+    registry = ToolRegistry()
+    registry.register(_SpotifyTool())
+    local_settings = settings.model_copy(update={"llm_provider": "local"})
+    agent = Agent(
+        settings=local_settings,  # type: ignore[arg-type]
+        llm=_FakeLLM(""),  # type: ignore[arg-type]
+        tool_registry=registry,
+    )
+
+    system = agent._build_system()
+
+    assert "N'écris JAMAIS l'appel en texte" not in system
+    assert "ÉCRIS l'appel" in system
+    assert 'spotify_control(action="pause")' in system

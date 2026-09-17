@@ -162,6 +162,34 @@ class Gateway:
                             name="cf-tools-text",
                         )
 
+                # Toujours rien alors que le modèle a lui-même routé [CF] —
+                # c'est-à-dire qu'il annonce une ACTION. Observé en usage réel :
+                # « pause ma musique » -> « C'est fait. », aucun appel écrit,
+                # aucun appel natif, musique inchangée. On redemande une fois,
+                # avec un prompt réduit au menu d'outils (le prompt complet fait
+                # 22 Ko et noie la consigne).
+                if (
+                    tool_task is None
+                    and tool_capture is not None
+                    and route is RouteEnum.CONFIRM_FIRE
+                ):
+                    forced = await agent.force_tool_call(message)
+                    if forced:
+                        logger.warning(
+                            "Aucun appel dans le premier jet — relance en prompt minimal",
+                            names=[n for _, n, _ in forced],
+                        )
+                        tool_capture.calls.extend(forced)
+                        tool_task = asyncio.create_task(
+                            agent.execute_captured_tools(tool_capture),
+                            name="cf-tools-forced",
+                        )
+                    else:
+                        logger.warning(
+                            "Route CF sans aucun outil déclenché — réponse non vérifiée",
+                            ack=ack_text[:120],
+                        )
+
                 # Aucun outil : le premier jet EST la réponse. On le rend tel quel,
                 # débarrassé d'une éventuelle notation d'appel restée sans suite.
                 if tool_task is None:

@@ -278,26 +278,30 @@ class Agent:
             dynamic_parts.append(
                 f"## Outils disponibles (router [CF] pour les utiliser)\n\n{tool_lines}"
             )
-            # Contre-instruction indispensable aux modèles locaux. Le prompt
-            # statique illustre les outils par des exemples du type
-            # `execute_cli(command="open -a 'Safari'")` : Claude les lit comme
-            # une indication d'intention et appelle quand même nativement, un
-            # modèle local de 14B les recopie littéralement en texte. Le gateway
-            # ne déclenche l'exécution que sur un tool_call NATIF — la ligne
-            # s'affichait donc dans la conversation sans que rien ne s'exécute
-            # (observé en usage réel avec qwen3:14b sur « pause ma musique »).
+            # Le transport d'appel RÉEL en mode local, c'est le texte.
+            #
+            # Ce bloc disait l'inverse : « ÉMETS UN APPEL NATIF / n'écris JAMAIS
+            # l'appel en texte ». Deux raisons de l'annuler :
+            #   - la campagne d'ablation (scripts/diag_native_tools.ps1) a mesuré
+            #     exactement cette contre-instruction : elle ne produit AUCUN
+            #     tool_call natif, à aucune des exécutions ;
+            #   - son argument (« le gateway n'exécute que le natif ») n'est plus
+            #     vrai : l'analyseur de texte du gateway exécute la ligne écrite.
+            # Résultat observé : le modèle obéissait à l'interdiction, n'écrivait
+            # plus rien, n'émettait toujours rien nativement — et répondait
+            # « C'est fait. » pendant que la musique continuait.
             if _s.llm_provider == "local":
                 dynamic_parts.append(
-                    "## Comment appeler un outil — mécanisme natif OBLIGATOIRE\n\n"
-                    "Les outils ci-dessus te sont fournis par le mécanisme natif de "
-                    "function calling. Pour en utiliser un, ÉMETS UN APPEL D'OUTIL "
-                    "NATIF.\n\n"
-                    "N'écris JAMAIS l'appel en texte dans ta réponse. Écrire "
-                    "`spotify_control(action=\"pause\")` n'exécute RIEN : "
-                    "l'utilisateur voit cette ligne et sa musique continue.\n\n"
-                    "Les notations `outil(arg=\"valeur\")` qui apparaissent ailleurs "
-                    "dans ce prompt indiquent QUEL outil employer et avec quels "
-                    "arguments — ce ne sont pas un format de sortie."
+                    "## Comment déclencher un outil — ÉCRIS l'appel\n\n"
+                    "Pour utiliser un outil, écris son appel sur sa propre ligne, "
+                    "exactement sous cette forme :\n\n"
+                    'spotify_control(action="pause")\n\n'
+                    "Écrire cette ligne EXÉCUTE l'outil : Jarvis la lit, l'exécute, "
+                    "puis te redonne le résultat pour que tu formules ta réponse. "
+                    "Sans cette ligne, RIEN ne s'exécute.\n\n"
+                    "Donc, règle absolue : n'écris jamais qu'une action est faite "
+                    "(« c'est lancé », « c'est fait », « voilà ») si tu n'as pas "
+                    "écrit l'appel correspondant dans la même réponse."
                 )
 
         if self._skill_registry is not None:
@@ -528,6 +532,49 @@ class Agent:
                 yield chunk
 
         return _simple_stream(), None
+
+    async def force_tool_call(self, user_message: str) -> list[tuple[str, str, dict]]:
+        """Relance minimale quand le premier jet n'a produit AUCUN appel.
+
+        Le prompt complet fait 22 Ko : la consigne d'outil y est noyée, et le
+        modèle répond volontiers « c'est fait » sans rien déclencher. L'ablation
+        montre qu'un prompt réduit au menu d'outils obtient un appel là où le
+        prompt complet n'en obtient aucun — c'est ce prompt-là qu'on envoie ici,
+        pour une seule question : quel appel, s'il y en a un.
+
+        Retourne [] si aucun outil ne convient ou si la relance échoue : dans ce
+        cas l'appelant garde la réponse du premier jet.
+        """
+        if self._tool_registry is None or not self._tool_registry.has_tools():
+            return []
+
+        tool_lines = "\n".join(
+            f"- `{s['name']}` : {s['description']}" for s in self._tool_registry.schemas()
+        )
+        system = (
+            "Tu déclenches des outils. Tu réponds UNIQUEMENT par la ligne "
+            "d'appel, sans phrase et sans explication.\n\n"
+            f"Outils disponibles :\n{tool_lines}\n\n"
+            "Format exact, sur une seule ligne :\n"
+            'nom_outil(argument="valeur")\n\n'
+            "Si aucun outil ne convient, réponds exactement : AUCUN"
+        )
+
+        try:
+            result = await self._llm.complete(
+                messages=[{"role": "user", "content": user_message}],
+                system=system,
+                stream=False,
+            )
+        except Exception as e:
+            # jrv: relance opportuniste — son échec n'est pas une panne, on
+            # retombe simplement sur la réponse du premier jet. Volontairement
+            # non mappé (scripts/error_audit/scan.py).
+            logger.warning("Relance outil échouée", error=str(e))
+            return []
+
+        text = result if isinstance(result, str) else ""
+        return self.extract_text_tool_calls(text)
 
     async def execute_captured_tools(self, capture: ToolCapture) -> list[str]:
         """Exécute en parallèle les tool_use capturés et retourne les résultats bruts."""

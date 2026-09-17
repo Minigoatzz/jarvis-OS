@@ -237,7 +237,15 @@ if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
 
 
-# ── La contre-instruction au prompt statique (mode local uniquement) ────────
+# ── La consigne d'appel d'outil (mode local uniquement) ─────────────────────
+#
+# CES TESTS ONT DÉJÀ VERROUILLÉ LE BUG. Ils exigeaient la contre-instruction
+# « N'écris JAMAIS l'appel en texte », c'est-à-dire exactement la variante E de
+# l'ablation — mesurée sans AUCUN tool_call natif, à chaque tirage. Le modèle
+# obéissait à l'interdiction, n'écrivait plus l'appel, n'en émettait toujours
+# aucun nativement, et répondait « C'est fait. » sans rien exécuter. La suite
+# restait verte pendant ce temps. La consigne est inversée : en local, écrire
+# l'appel EST le mécanisme d'exécution.
 
 
 def _system_prompt_for(provider: str) -> str:
@@ -256,19 +264,35 @@ def _system_prompt_for(provider: str) -> str:
     return agent._build_system()
 
 
-def test_local_mode_gets_native_tool_call_directive() -> None:
-    """Le prompt statique enseigne la notation texte par l'exemple ; en local il
-    faut la contredire explicitement."""
+def test_local_mode_is_told_to_write_the_call() -> None:
+    """En local, la ligne écrite EST le transport d'exécution : le prompt doit
+    la demander, avec le format exact que l'analyseur du gateway reconnaît."""
     prompt = _system_prompt_for("local")
 
-    assert "mécanisme natif" in prompt
-    assert "N'écris JAMAIS l'appel en texte" in prompt
+    assert "ÉCRIS l'appel" in prompt
+    assert 'spotify_control(action="pause")' in prompt
+
+
+def test_local_mode_never_forbids_writing_the_call_again() -> None:
+    """Garde-fou permanent contre la régression : plus jamais d'interdiction."""
+    prompt = _system_prompt_for("local")
+
+    assert "N'écris JAMAIS l'appel en texte" not in prompt
+    assert "mécanisme natif OBLIGATOIRE" not in prompt
+
+
+def test_local_mode_forbids_claiming_success_without_a_call() -> None:
+    """« C'est fait. » sans appel est précisément ce qui a été observé."""
+    prompt = _system_prompt_for("local")
+
+    assert "c'est fait" in prompt.lower()
 
 
 def test_cloud_mode_prompt_unchanged() -> None:
     """Claude appelle nativement malgré les exemples : ne pas alourdir son prompt."""
     prompt = _system_prompt_for("api")
 
+    assert "ÉCRIS l'appel" not in prompt
     assert "N'écris JAMAIS l'appel en texte" not in prompt
 
 
