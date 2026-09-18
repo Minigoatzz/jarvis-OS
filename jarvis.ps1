@@ -79,7 +79,15 @@ function Stop-PortListeners {
     foreach ($port in $Ports) {
         $connections = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
         foreach ($conn in $connections) {
-            Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+            # -ErrorAction SilentlyContinue avalait les echecs : un process
+            # appartenant a une autre session ou a un autre utilisateur refuse
+            # d'etre tue, et l'appelant croyait le port libere.
+            try {
+                Stop-Process -Id $conn.OwningProcess -Force -ErrorAction Stop
+            } catch {
+                Write-Host ("  [!] impossible de tuer le PID {0} sur le port {1} : {2}" -f `
+                    $conn.OwningProcess, $port, $_.Exception.Message) -ForegroundColor DarkYellow
+            }
         }
     }
 }
@@ -159,6 +167,21 @@ function Stop-JarvisRuntime {
             # en cours dans le depot.
             elseif ($cmd -match $rootPattern -and
                     $cmd -match "(-m\s+jarvis\b|main\.py|voice_agent\.py|bundle\\\.venv)") { $kill = $true }
+            # Enfants multiprocessing ORPHELINS. Leur ligne de commande ne
+            # contient ni "-m jarvis" ni un script du projet, seulement
+            # `-c "from multiprocessing.spawn import spawn_main; spawn_main(
+            # parent_pid=NNNN, ...)"` -- ils echappaient donc aux deux regles
+            # ci-dessus et survivaient a tous les arrets.
+            #
+            # Or ils detiennent un handle HERITE de la socket d'ecoute : le port
+            # restait pris, attribue a un PID parent deja mort (Win32_Process ne
+            # renvoyait plus aucune ligne pour lui). Constate le 18/09 : port
+            # 8000 tenu par le PID 25692 inexistant, pendant que le PID 33456
+            # tournait toujours avec parent_pid=25692.
+            #
+            # Condition stricte : l'interpreteur doit etre celui du projet, pour
+            # ne pas tuer un multiprocessing sans rapport.
+            elseif ($cmd -match $rootPattern -and $cmd -match "multiprocessing\.spawn") { $kill = $true }
         }
         if ($_.Name -eq "cmd.exe" -and $cmd -match "Temp\\jarvis") { $kill = $true }
         if ($kill) {
@@ -404,9 +427,13 @@ switch ($Command.ToLowerInvariant()) {
         foreach ($p in $ports) {
             $conns = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
             foreach ($c in $conns) {
-                $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
-                $procName = if ($proc) { $proc.ProcessName } else { "inconnu" }
-                $stuck += [pscustomobject]@{ Port = $p; ProcId = $c.OwningProcess; Name = $procName }
+                $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $c.OwningProcess) -ErrorAction SilentlyContinue
+                $procName = if ($cim) { $cim.Name } else { "introuvable (autre session / droits ?)" }
+                $cmdLine = if ($cim -and $cim.CommandLine) { $cim.CommandLine } else { "" }
+                $stuck += [pscustomobject]@{
+                    Port = $p; ProcId = $c.OwningProcess; Name = $procName
+                    Addr = $c.LocalAddress; Cmd = $cmdLine
+                }
             }
         }
 
@@ -416,9 +443,14 @@ switch ($Command.ToLowerInvariant()) {
         } else {
             Write-Host "  Jarvis arrete, MAIS des ports ecoutent encore :" -ForegroundColor Yellow
             foreach ($s in $stuck) {
-                Write-Host ("    port {0} <- PID {1} ({2})" -f $s.Port, $s.ProcId, $s.Name) -ForegroundColor Yellow
+                Write-Host ("    {0}:{1} <- PID {2} ({3})" -f $s.Addr, $s.Port, $s.ProcId, $s.Name) -ForegroundColor Yellow
+                if ($s.Cmd) {
+                    $short = $s.Cmd
+                    if ($short.Length -gt 110) { $short = $short.Substring(0, 110) + "..." }
+                    Write-Host ("        {0}" -f $short) -ForegroundColor DarkGray
+                }
             }
-            Write-Host "    Stop-Process -Id <PID> -Force" -ForegroundColor DarkGray
+            Write-Host "    Si le nom est introuvable : relance PowerShell en administrateur." -ForegroundColor DarkGray
         }
         Write-Host ""
     }
