@@ -25,6 +25,21 @@ SKILLS_INDEX_URL = f"{SKILLS_REPO_RAW}/index.json"
 LOCAL_CATALOG = Path(__file__).parent / "catalog.json"
 
 
+def _installed_dir_names() -> set[str]:
+    """Noms des dossiers réellement posés dans skills_data/installed/.
+
+    Sert de second critère au drapeau `installed` du store (cf. fetch_catalog).
+    """
+    try:
+        return {p.name for p in SKILLS_INSTALLED_DIR.iterdir() if p.is_dir()}
+    except OSError:
+        # jrv: répertoire absent au premier lancement — cas nominal, le store
+        # affiche simplement tout comme non installé. Volontairement non mappé
+        # (scripts/error_audit/scan.py).
+        return set()
+
+
+
 class SkillInstaller:
     def _inject_env_vars(self, requires_env: list[str], skill_name: str) -> None:
         """Ajoute les variables requires_env manquantes dans .env avec valeur vide."""
@@ -65,9 +80,22 @@ class SkillInstaller:
             all_items = self._load_local_catalog()
             offline = True
 
-        installed = {s["name"] for s in skill_registry.list_installed()}
+        # Deux espaces de noms distincts, et rien ne force leur égalité :
+        #   - le STORE identifie un item par son `name` d'index.json ;
+        #   - le REGISTRE l'identifie par le `name` du manifeste installé.
+        # L'index publie la vue globe sous `globe` (path views/globe) alors que
+        # le manifeste posé sur disque déclare `globe-view` : la comparaison sur
+        # le seul `name` échouait, et le globe était le seul des quatre à ne
+        # jamais porter le badge « Installé » — pourtant bien chargé (il figure
+        # dans /api/skills/installed). Le DOSSIER d'installation est le seul
+        # identifiant commun aux deux bouts : on l'accepte aussi.
+        installed_names = {s["name"] for s in skill_registry.list_installed()}
+        installed_dirs = _installed_dir_names()
         for item in all_items:
-            item["installed"] = item["name"] in installed
+            folder = str(item.get("path") or "").rstrip("/").rsplit("/", 1)[-1]
+            item["installed"] = item["name"] in installed_names or (
+                bool(folder) and folder in installed_dirs
+            )
             item["offline"] = offline
 
         return all_items

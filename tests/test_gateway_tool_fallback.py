@@ -365,3 +365,22 @@ def test_parser_ignores_unterminated_call() -> None:
     agent = _agent_with("spotify_control")
 
     assert agent.extract_text_tool_calls('spotify_control(action="pau') == []
+
+
+def test_local_prompt_routes_device_actions_to_cf_not_project() -> None:
+    """Symptôme réel : « montre moi paris », « joue red house », « montre la
+    météo » repartaient tous avec « C'est lancé, suis l'avancement dans le
+    dashboard » — l'ack canonique de [BG:PROJECT]. La section [BG:PROJECT] du
+    prompt statique pèse sept exemples sur dix ; un modèle 14B s'aligne sur le
+    bloc le plus insistant. La consigne locale, placée après, rétablit [CF]."""
+    prompt = _system_prompt_for("local")
+
+    assert "Routage des actions" in prompt
+    assert "Jamais `[BG:PROJECT]`" in prompt
+
+
+def test_cloud_mode_has_no_routing_override() -> None:
+    """Claude route correctement : ne pas alourdir son prompt."""
+    prompt = _system_prompt_for("api")
+
+    assert "Routage des actions" not in prompt

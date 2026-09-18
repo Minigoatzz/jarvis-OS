@@ -301,7 +301,17 @@ class Agent:
                     "Sans cette ligne, RIEN ne s'exécute.\n\n"
                     "Donc, règle absolue : n'écris jamais qu'une action est faite "
                     "(« c'est lancé », « c'est fait », « voilà ») si tu n'as pas "
-                    "écrit l'appel correspondant dans la même réponse."
+                    "écrit l'appel correspondant dans la même réponse.\n\n"
+                    "### Routage des actions\n\n"
+                    "Une action immédiate sur une app, un appareil ou l'écran — "
+                    "musique, carte, globe, vue, météo, ouvrir quelque chose — "
+                    "c'est `[CF]` SUIVI DE L'APPEL. Jamais `[BG:PROJECT]`.\n\n"
+                    "`[BG:PROJECT]` sert uniquement à PRODUIRE DES FICHIERS que "
+                    f"{firstname} relira : documents, scripts, emails rédigés. "
+                    "« Montre-moi Paris », « joue Red House », « mets en pause », "
+                    "« montre la météo » ne produisent aucun fichier — ce sont "
+                    "des `[CF]`, et répondre « C'est lancé, suis l'avancement dans "
+                    "le dashboard » à ces demandes est une erreur."
                 )
 
         if self._skill_registry is not None:

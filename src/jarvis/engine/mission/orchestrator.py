@@ -232,7 +232,16 @@ class ProjectOrchestrator:
 
     # ── Approval system ───────────────────────────────────────────────────────
 
-    async def _request_approval(self, project_id: str, step_id: str, description: str) -> bool:
+    async def _request_approval(
+        self, project_id: str, step_id: str, description: str
+    ) -> bool | None:
+        """True = approuvé, False = refusé explicitement, None = AUCUNE réponse.
+
+        La distinction compte : sans elle, une demande jamais affichée expirait
+        au bout de 10 minutes et le step était enregistré « Refusée par
+        l'utilisateur » — on reprochait à l'utilisateur un refus qu'il n'avait
+        jamais eu l'occasion de formuler.
+        """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
         key = f"{project_id}:{step_id}"
@@ -253,8 +262,12 @@ class ProjectOrchestrator:
         except TimeoutError:
             collector.error("JRV-MSN-001", "JRV-MSN-001")
             self._pending_approvals.pop(key, None)
-            logger.warning("Approval timeout", key=key)
-            return False
+            logger.warning(
+                "Approbation sans réponse — la demande a-t-elle été affichée ?",
+                key=key,
+                description=description,
+            )
+            return None
 
     def resolve_approval(self, project_id: str, step_id: str, approved: bool) -> bool:
         key = f"{project_id}:{step_id}"

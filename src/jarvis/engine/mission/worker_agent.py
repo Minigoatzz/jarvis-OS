@@ -219,7 +219,7 @@ class WorkerAgent:
         project: Project,
         store: ProjectStore,
         broadcast_event: Callable[[dict], None],
-        approval_callback: Callable[[str, str, str], Awaitable[bool]],
+        approval_callback: Callable[[str, str, str], Awaitable[bool | None]],
         llm: LLMProvider,
         budget_guard: BudgetGuard | None = None,
         governance: Governance | None = None,
@@ -473,12 +473,26 @@ class WorkerAgent:
                 step_id=step.id,
             )
 
-            approved = await self._approval_cb(self._project.id, step.id, step.description)
+            decision = await self._approval_cb(self._project.id, step.id, step.description)
 
-            if not approved:
+            if decision is not True:
                 step.status = StepStatus.SKIPPED
-                step.output = "Refusée par l'utilisateur."
-                await self._log("info", f"Étape refusée : {step.title}", step_id=step.id)
+                if decision is None:
+                    # Personne n'a répondu. Ce n'est PAS un refus : la demande
+                    # n'a peut-être jamais été affichée. Le dire tel quel évite
+                    # d'imputer à l'utilisateur une décision qu'il n'a pas prise.
+                    step.output = (
+                        "Aucune réponse à la demande d'approbation — "
+                        "elle a expiré sans décision."
+                    )
+                    await self._log(
+                        "warning",
+                        f"Approbation sans réponse : {step.title}",
+                        step_id=step.id,
+                    )
+                else:
+                    step.output = "Refusée par l'utilisateur."
+                    await self._log("info", f"Étape refusée : {step.title}", step_id=step.id)
                 self._store.save_project(self._project)
                 self._push_update()
                 return
@@ -770,12 +784,22 @@ class WorkerAgent:
             )
         # APPROVAL ou DRY_RUN → demander à l'humain
         approval_id = f"tool-{uuid.uuid4().hex[:6]}"
-        approved = await self._approval_cb(
+        decision = await self._approval_cb(
             self._project.id,
             approval_id,
             f"Outil '{name}' (cat. {cat}, niveau {int(al)}) requiert votre approbation",
         )
-        if not approved:
+        if decision is not True:
+            if decision is None:
+                await self._log(
+                    "warning",
+                    f"Tool {name} : approbation sans réponse (demande expirée)",
+                    data={"category": cat},
+                )
+                return (
+                    f"ACCÈS REFUSÉ : aucune réponse à la demande d'approbation "
+                    f"pour '{name}' — elle a expiré sans décision."
+                )
             await self._log(
                 "warning", f"Tool {name} non approuvé par l'utilisateur", data={"category": cat}
             )
