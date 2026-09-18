@@ -25,6 +25,7 @@ def test_check_port_uses_dotenv_port(
     """
     occupe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     occupe.bind(("127.0.0.1", 0))
+    occupe.listen(1)
     port = occupe.getsockname()[1]
     try:
         env_path = tmp_path / ".env"
@@ -63,9 +64,32 @@ def test_main_charge_le_dotenv_avant_de_controler_le_port() -> None:
 def test_check_port_detects_occupied_port(monkeypatch: pytest.MonkeyPatch) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
     port = sock.getsockname()[1]
     try:
         monkeypatch.setenv("PORT", str(port))
         assert preflight.check_port() is False
+    finally:
+        sock.close()
+
+
+def test_bound_but_not_listening_is_not_reported_as_occupied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Analogue déterministe du cas TIME_WAIT.
+
+    Une socket liée sans `listen()` n'accepte aucune connexion : personne ne
+    sert sur ce port. L'ancien `bind()` nu le déclarait pourtant occupé — c'est
+    exactement ce qui bloquait un redémarrage juste après un arrêt, le temps que
+    la socket précédente sorte de TIME_WAIT.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))  # liée, mais jamais mise en écoute
+    port = sock.getsockname()[1]
+    try:
+        monkeypatch.setenv("PORT", str(port))
+        assert preflight.check_port() is True, (
+            "rien n'écoute sur ce port — le refuser interdit un démarrage valide"
+        )
     finally:
         sock.close()

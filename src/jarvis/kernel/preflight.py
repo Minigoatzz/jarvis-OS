@@ -195,23 +195,36 @@ def _check_llm_key_live(backend: str, key_name: str, key: str) -> None:
 
 
 def check_port() -> bool:
+    """Vrai si RIEN ne sert sur le port — testé par connexion, pas par bind().
+
+    L'ancienne version tentait un `bind()` nu. Après l'arrêt d'une instance, sa
+    socket d'écoute reste en TIME_WAIT (~2 min sous Windows) : plus rien
+    n'écoute, mais un `bind()` sans SO_REUSEADDR échoue quand même. Le prévol
+    refusait donc un démarrage qui aurait parfaitement fonctionné — uvicorn,
+    lui, pose SO_REUSEADDR avant de se lier. Symptôme vécu : `stop` libère bien
+    le port, `run` répond « Port 8000 déjà utilisé », et la seule issue est
+    d'attendre ou de changer de port.
+
+    Poser SO_REUSEADDR ici serait pire : sous Windows il autorise à se lier
+    PAR-DESSUS une socket vivante, et le prévol laisserait démarrer un second
+    Jarvis en silence.
+
+    On pose donc la vraie question — « quelqu'un sert-il sur ce port ? » — par
+    une tentative de connexion. TIME_WAIT n'accepte aucune connexion, un
+    serveur vivant si.
+    """
     port = int(os.getenv("PORT", "8000"))
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", port))
-        return True
-    except OSError:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        occupied = s.connect_ex(("127.0.0.1", port)) == 0
+    if occupied:
         _err(
             "JRV-KRN-010",
             f"Port {port} déjà utilisé",
             f"Le port {port} est occupé. Ferme l'instance précédente ou change PORT dans .env.",
         )
         return False
-    finally:
-        try:
-            s.close()
-        except Exception:  # jrv: socket close best-effort
-            pass
+    return True
 
 
 def main() -> int:

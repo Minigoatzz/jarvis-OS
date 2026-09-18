@@ -390,10 +390,36 @@ switch ($Command.ToLowerInvariant()) {
         # python enfant. Le bloc finally de Invoke-JarvisRun appelle bien
         # Stop-JarvisRuntime, mais PowerShell ne garantit pas son execution sur
         # une interruption Ctrl-C : le python survit et garde le port.
-        $apiPort = Get-DotEnvValue -Key "PORT" -Default "8000"
+        $apiPort = [int](Get-DotEnvValue -Key "PORT" -Default "8000")
+        $ports = @($apiPort, 7880, 7881, 8765) | Select-Object -Unique
+
         Stop-JarvisRuntime
+        # Laisser l'OS retirer les sockets avant de conclure.
+        Start-Sleep -Milliseconds 500
+
+        # VERIFIER, pas annoncer. La version precedente affichait "ports liberes"
+        # sans rien controler : quand un process survivait, le message mentait et
+        # le `run` suivant echouait sur "Port deja utilise" sans qu'on sache lequel.
+        $stuck = @()
+        foreach ($p in $ports) {
+            $conns = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+            foreach ($c in $conns) {
+                $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+                $procName = if ($proc) { $proc.ProcessName } else { "inconnu" }
+                $stuck += [pscustomobject]@{ Port = $p; ProcId = $c.OwningProcess; Name = $procName }
+            }
+        }
+
         Write-Host ""
-        Write-Host "  Jarvis arrete - ports $apiPort, 7880, 7881, 8765 liberes" -ForegroundColor Green
+        if ($stuck.Count -eq 0) {
+            Write-Host ("  Jarvis arrete - ports {0} liberes" -f ($ports -join ", ")) -ForegroundColor Green
+        } else {
+            Write-Host "  Jarvis arrete, MAIS des ports ecoutent encore :" -ForegroundColor Yellow
+            foreach ($s in $stuck) {
+                Write-Host ("    port {0} <- PID {1} ({2})" -f $s.Port, $s.ProcId, $s.Name) -ForegroundColor Yellow
+            }
+            Write-Host "    Stop-Process -Id <PID> -Force" -ForegroundColor DarkGray
+        }
         Write-Host ""
     }
     "doctor" {
