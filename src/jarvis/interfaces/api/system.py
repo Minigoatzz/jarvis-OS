@@ -49,8 +49,8 @@ async def jarvis_doctor() -> dict:
                 "status": "ok" if r.status_code == 200 else "error",
                 "detail": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             }
-        except Exception:
-            collector.error("JRV-API-001", "JRV-API-001")
+        except Exception as e:
+            collector.error("JRV-API-001", f"Sonde Anthropic : {e}")
             checks["anthropic"] = {"status": "error", "detail": "Inaccessible"}
 
         try:
@@ -62,8 +62,8 @@ async def jarvis_doctor() -> dict:
                 "status": "ok" if r.status_code == 200 else "error",
                 "detail": os.getenv("ELEVENLABS_MODEL", "—"),
             }
-        except Exception:
-            collector.error("JRV-API-001", "JRV-API-001")
+        except Exception as e:
+            collector.error("JRV-API-001", f"Sonde ElevenLabs : {e}")
             checks["elevenlabs"] = {"status": "error", "detail": "Inaccessible"}
 
         try:
@@ -75,8 +75,8 @@ async def jarvis_doctor() -> dict:
                 "status": "ok" if r.status_code == 200 else "error",
                 "detail": "Nova-2",
             }
-        except Exception:
-            collector.error("JRV-API-001", "JRV-API-001")
+        except Exception as e:
+            collector.error("JRV-API-001", f"Sonde Deepgram : {e}")
             checks["deepgram"] = {"status": "error", "detail": "Inaccessible"}
 
     token = os.getenv("MAPBOX_TOKEN", "")
@@ -97,8 +97,8 @@ async def jarvis_doctor() -> dict:
             "status": "ok" if proc.returncode == 0 else "error",
             "detail": "Disponible" if proc.returncode == 0 else "Non disponible",
         }
-    except Exception:
-        collector.error("JRV-API-001", "JRV-API-001")
+    except Exception as e:
+        collector.error("JRV-API-001", f"Sonde Ollama : {e}")
         checks["docker"] = {"status": "error", "detail": "Non installé"}
 
     mem_topics = MEMORY_DATA_DIR / "topics"
@@ -108,8 +108,8 @@ async def jarvis_doctor() -> dict:
     try:
         skills = skill_registry.list_installed()
         checks["skills"] = {"status": "ok", "detail": f"{len(skills)} installés"}
-    except Exception:
-        collector.error("JRV-API-001", "JRV-API-001")
+    except Exception as e:
+        collector.error("JRV-API-001", f"Inventaire des skills : {e}")
         checks["skills"] = {"status": "warning", "detail": "Registre indisponible"}
 
     checks["proactive"] = {"status": "ok", "detail": "Actif"}
@@ -143,8 +143,8 @@ async def system_stats(request: Request) -> dict:
                 proj_running += 1
             elif s == "done":
                 proj_done += 1
-        except Exception:
-            collector.error("JRV-API-001", "JRV-API-001")
+        except Exception as e:
+            collector.error("JRV-API-001", f"Lecture d'un projet : {e}")
             pass
 
     topics_count = len(list(topics_dir.glob("*.md"))) if topics_dir.exists() else 0
@@ -198,8 +198,8 @@ async def system_perf() -> dict:
                 "ram_mb": round(p.memory_info().rss / 1024 / 1024, 1),
                 "threads": p.num_threads(),
             }
-    except Exception:
-        collector.error("JRV-API-001", "JRV-API-001")
+    except Exception as e:
+        collector.error("JRV-API-001", f"Metriques du process Jarvis : {e}")
         pass
 
     return {
@@ -242,8 +242,8 @@ async def cleanup_done_projects(request: Request) -> dict:  # noqa: ARG001
                 workspace = state_file.parent.parent
                 shutil.rmtree(workspace, ignore_errors=True)
                 removed += 1
-        except Exception:
-            collector.error("JRV-API-001", "JRV-API-001")
+        except Exception as e:
+            collector.error("JRV-API-001", f"Nettoyage d'un workspace : {e}")
             pass
     return {"removed": removed}
 

@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 
 from loguru import logger
 
-from jarvis.engine.agent import Agent
+from jarvis.engine.agent import Agent, claims_completion
 from jarvis.engine.background.notifications import NotificationQueue
 from jarvis.engine.background.worker import BackgroundWorker
 from jarvis.engine.llm_errors import friendly_llm_error
@@ -178,10 +178,17 @@ class Gateway:
                 # aucun appel natif, musique inchangée. On redemande une fois,
                 # avec un prompt réduit au menu d'outils (le prompt complet fait
                 # 22 Ko et noie la consigne).
+                # Déclencheur : la route CF (le modèle annonce une action) OU
+                # une phrase qui AFFIRME que l'action a eu lieu. Le tag seul ne
+                # suffisait pas : « montre moi le cockpit » part en [I], le
+                # repli ne se déclenchait pas, et « C'est lancé, le cockpit est
+                # affiché. » sortait sans qu'aucun outil n'ait tourné (zéro
+                # `Tool executed` dans api.log sur ce tour).
+                asserts_action = claims_completion(ack_text)
                 if (
                     tool_task is None
                     and tool_capture is not None
-                    and route is RouteEnum.CONFIRM_FIRE
+                    and (route is RouteEnum.CONFIRM_FIRE or asserts_action)
                 ):
                     forced = await agent.force_tool_call(message)
                     if forced:
@@ -196,15 +203,33 @@ class Gateway:
                         )
                     else:
                         logger.warning(
-                            "Route CF sans aucun outil déclenché — réponse non vérifiée",
+                            "Aucun outil déclenché — réponse non vérifiée",
+                            route=route.value,
                             ack=ack_text[:120],
                         )
 
                 # Aucun outil : le premier jet EST la réponse. On le rend tel quel,
                 # débarrassé d'une éventuelle notation d'appel restée sans suite.
                 if tool_task is None:
-                    if held:
-                        yield agent.strip_text_tool_calls("".join(held))
+                    if not held:
+                        return
+                    text = agent.strip_text_tool_calls("".join(held))
+                    # Dernier garde-fou : aucun outil n'a tourné, et la phrase
+                    # affirme pourtant que l'action est faite. Laisser passer,
+                    # c'est mentir à l'utilisateur — le symptôme qui revient
+                    # depuis le début (musique non pausée, vue non affichée).
+                    if asserts_action:
+                        logger.warning(
+                            "Affirmation d'action sans exécution — réponse remplacée",
+                            ack=text[:120],
+                        )
+                        yield (
+                            "Je n'ai pas réussi à déclencher l'action — aucun outil "
+                            "n'a été exécuté, donc rien n'a changé. Reformule ta "
+                            "demande et je réessaie."
+                        )
+                        return
+                    yield text
                     return
 
                 # Second appel LLM pour synthétiser les résultats — avant "done"

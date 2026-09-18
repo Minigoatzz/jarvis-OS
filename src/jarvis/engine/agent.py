@@ -34,6 +34,33 @@ _MAX_TOOL_RESULT_CHARS = 12_000
 _TOOL_ERROR_RE = re.compile(r"^\[JRV-[A-Z]+-\d+\]")
 
 
+# Formules par lesquelles le modèle affirme qu'une action a eu lieu. Toutes
+# relevées dans des échanges réels où AUCUN outil n'avait tourné : « C'est
+# lancé, le cockpit est affiché. », « C'est fait. », « Voilà la météo. »
+_COMPLETION_CLAIM_RE = re.compile(
+    r"(c'est\s+(lanc|fait|pars|bon|pause|paus)"
+    r"|voil[àa]\s"
+    r"|est\s+(affich|lanc|activ)"
+    r"|j'ai\s+(lanc|affich|ouvert|mis|activ)"
+    r"|je\s+lance\b"
+    r"|c'est\s+parti)",
+    re.IGNORECASE,
+)
+
+
+def claims_completion(text: str) -> bool:
+    """True si la réponse affirme qu'une action a été effectuée.
+
+    Sert d'unique déclencheur au garde-fou du gateway : une affirmation
+    d'action sans outil exécuté est un mensonge, et c'est la dernière forme
+    qu'il restait. On ne se fie PAS au tag de routing pour ça — « montre moi le
+    cockpit » a été taggé [I], donc hors du repli réservé à [CF], et la phrase
+    « C'est lancé, le cockpit est affiché. » est partie telle quelle alors que
+    le journal ne montre aucun `Tool executed` sur ce tour.
+    """
+    return bool(_COMPLETION_CLAIM_RE.search(text))
+
+
 def _is_tool_error(result: str) -> bool:
     """True si ce résultat d'outil est un échec.
 

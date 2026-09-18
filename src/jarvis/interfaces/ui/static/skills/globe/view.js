@@ -144,12 +144,14 @@
 
       case 'zoom_in': {
         if (!map) return;
+        stopAutoRotation();   // sinon setBearing annule le flyTo en cours
         map.flyTo({ zoom: map.getZoom() + 3, duration: 800, essential: true });
         break;
       }
 
       case 'zoom_out': {
         if (!map) return;
+        stopAutoRotation();   // idem — c'est ce qui rendait « dezoome » inerte
         map.flyTo({ zoom: Math.max(0, map.getZoom() - 3), duration: 800, essential: true });
         break;
       }
@@ -158,7 +160,6 @@
         if (!map) return;
         stopAutoRotation();
         map.flyTo({ center: [10, 20], zoom: 1.5, duration: 2000, essential: true });
-        map.once('moveend', startAutoRotation);
         break;
       }
 
@@ -224,7 +225,8 @@
       container.style.opacity = '1';
 
       if (map) {
-        startAutoRotation();
+        // Re-affichage d'une carte deja construite : on ne relance pas la
+        // rotation, pour la meme raison qu'au premier chargement.
         return;
       }
 
@@ -254,7 +256,11 @@
             'space-color': 'rgb(4, 4, 14)',
             'star-intensity': 0.8,
           });
-          startAutoRotation();
+          // La rotation ne demarre PLUS automatiquement. A 0,1 deg toutes les
+          // 16 ms (un tour en ~1 min) elle donnait le tournis, et surtout elle
+          // ecrit la camera en continu : un setBearing pendant un flyTo ANNULE
+          // l'animation, ce qui cassait « dezoome ». Elle reste disponible a la
+          // demande via la commande toggle_rotation.
 
           // Carte prête : vider la file des commandes reçues pendant le chargement
           // (ex. « montre Paris » au tout premier affichage à froid).
@@ -264,11 +270,17 @@
           queued.forEach(({ cmd, params }) => runCommand(cmd, params));
         });
 
-        // Stop rotation while user interacts
-        map.on('mousedown', stopAutoRotation);
-        map.on('touchstart', stopAutoRotation);
-        map.on('mouseup', startAutoRotation);
-        map.on('touchend', startAutoRotation);
+        // La rotation s'arrete des que l'utilisateur touche la carte, et ne
+        // repart QUE si elle tournait avant l'interaction. L'ancienne version
+        // la relancait a chaque relachement de souris, meme apres un
+        // deplacement manuel : impossible de regarder un endroit fixe.
+        let rotatingBeforeDrag = false;
+        const pause = () => { rotatingBeforeDrag = autoRotateOn; stopAutoRotation(); };
+        const resume = () => { if (rotatingBeforeDrag) startAutoRotation(); };
+        map.on('mousedown', pause);
+        map.on('touchstart', pause);
+        map.on('mouseup', resume);
+        map.on('touchend', resume);
 
       } catch (err) {
         container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--fg-1,#e8e8e8);font-family:monospace;font-size:13px;">${err.message}</div>`;
