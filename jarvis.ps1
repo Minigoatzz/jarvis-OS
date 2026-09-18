@@ -359,10 +359,12 @@ switch ($Command.ToLowerInvariant()) {
 
 if ($Command.Trim() -ne "") {
     $cmdLower = $Command.ToLowerInvariant()
-    if ($cmdLower -notin @("eclosion", "setup")) {
+    if ($cmdLower -notin @("eclosion", "setup", "stop", "kill")) {
         Ensure-Bundle
     }
-    Repair-BundleVenv
+    if ($cmdLower -notin @("stop", "kill")) {
+        Repair-BundleVenv
+    }
 }
 
 switch ($Command.ToLowerInvariant()) {
@@ -381,6 +383,18 @@ switch ($Command.ToLowerInvariant()) {
     }
     { $_ -in @("run", "start") } {
         Invoke-JarvisRun
+    }
+    { $_ -in @("stop", "kill") } {
+        # Ctrl-C ne suffit pas. L'API tourne dans un cmd.exe detache lance par
+        # Start-BackgroundProcess ; Stop-Process sur ce cmd parent ne tue pas le
+        # python enfant. Le bloc finally de Invoke-JarvisRun appelle bien
+        # Stop-JarvisRuntime, mais PowerShell ne garantit pas son execution sur
+        # une interruption Ctrl-C : le python survit et garde le port.
+        $apiPort = Get-DotEnvValue -Key "PORT" -Default "8000"
+        Stop-JarvisRuntime
+        Write-Host ""
+        Write-Host "  Jarvis arrete - ports $apiPort, 7880, 7881, 8765 liberes" -ForegroundColor Green
+        Write-Host ""
     }
     "doctor" {
         $port = Get-DotEnvValue -Key "PORT" -Default "8000"
@@ -407,6 +421,7 @@ switch ($Command.ToLowerInvariant()) {
         Write-Host "  Usage : .\jarvis.ps1 <commande>"
         Write-Host ""
         Write-Host "    run        demarre tout (LiveKit + API + Voice)"
+        Write-Host "    stop       arrete tout et libere les ports"
         Write-Host "    api        serveur FastAPI uniquement"
         Write-Host "    voice      pipeline vocal LiveKit"
         Write-Host "    livekit    serveur LiveKit local"
