@@ -49,6 +49,7 @@ from jarvis.capabilities.tools.memory import (
     MemorySearchTool,
     MemoryTopicWriteTool,
 )
+from jarvis.capabilities.tools.mission_control import MissionControlTool
 from jarvis.capabilities.tools.notion import NotionTasksTool
 from jarvis.capabilities.tools.preset import ExecutePresetTool
 from jarvis.capabilities.tools.registry import ToolRegistry
@@ -431,6 +432,11 @@ def build(
         reflexion=reflexion,
         bus=bus,
     )
+
+    # L'orchestrateur sait déjà tuer et relancer une mission ; rien ne
+    # l'exposait au modèle. Enregistré ici parce qu'il dépend de l'instance
+    # construite juste au-dessus.
+    tool_registry.register(MissionControlTool(orchestrator=orchestrator))
 
     # ── 13. Engine L2 — Gateway ────────────────────────────────────────────
 
