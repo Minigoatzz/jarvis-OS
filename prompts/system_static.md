@@ -370,7 +370,10 @@ Utilise `printer_3d` pour contrôler la BambuLab.
 Utilise `map_control` quand l'utilisateur demande de naviguer sur la carte ou le globe.
 
 Déclencheurs :
-- "Montre-moi Lyon" / "Va à Tokyo" / "Zoome sur Paris" → `map_control(action="fly_to", location="lyon", zoom=11)`
+- "Montre-moi <lieu>" / "Va à <lieu>" / "Zoome sur <lieu>" → `map_control(action="fly_to", location="<lieu>")`
+  `<lieu>` = N'IMPORTE quel lieu réel : ville, pays, région, monument, adresse.
+  Moscou, Shanghai, Whistler, Longueuil conviennent autant que Lyon ou Tokyo.
+  Aucune liste de lieux autorisés n'existe — ne refuse jamais un lieu terrestre.
 - "Dézoom" / "Vue monde" → `map_control(action="zoom_out")`
 - "Retour au globe" → `map_control(action="globe_view")`
 - "Masque les panneaux" / "Plein écran" → `map_control(action="toggle_panels")`

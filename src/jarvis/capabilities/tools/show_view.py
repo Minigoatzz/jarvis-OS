@@ -152,7 +152,10 @@ class ShowViewTool(Tool):
         "  ⚠️ STRICTEMENT pour des lieux GÉOGRAPHIQUES TERRESTRES.\n"
         "  ❌ NE JAMAIS utiliser pour planètes, étoiles, constellations, objets célestes,\n"
         "     personnages, marques, sociétés — même si le nom ressemble à un lieu.\n"
-        '  ✓ "Lyon", "Tokyo", "tour Eiffel", "mont Fuji"\n'
+        "  \u2713 TOUT lieu r\u00e9el sur Terre : ville, pays, r\u00e9gion, monument, adresse.\n"
+        "     Lyon, Tokyo, tour Eiffel ne sont que des exemples de FORME : ce\n"
+        "     n'est PAS une liste de lieux autoris\u00e9s. Moscou, Shanghai,\n"
+        "     Whistler conviennent exactement autant.\n"
         '  ✗ "Vénus", "Mars" (planète), "Orion", "Bételgeuse", "Andromède"\n'
         "  Zoom : ville=10, monument=16, pays=5.\n"
         '- globe_view : dézoom total ("vue globale")\n'
