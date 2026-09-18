@@ -17,6 +17,9 @@
 
 Sheets in [sheets/](sheets/).
 
+Planned: [Mapbox as a tool](mapbox-as-a-tool.md) — routing, calendar drive
+times, road trips. Not started.
+
 
 ## Related docs
 
