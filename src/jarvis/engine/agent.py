@@ -145,7 +145,27 @@ def _coerce_arg(raw: str) -> object:
 
 
 def _parse_call_args(args_raw: str) -> dict:
-    """Parse `action="pause", level=50` en {"action": "pause", "level": 50}."""
+    """Parse les arguments d'un appel ecrit en texte.
+
+    Deux formes, toutes deux produites par qwen3:14b :
+      - `action="pause", level=50`        -> clef=valeur
+      - `{"action": "fly_to", "zoom": 12}` -> objet JSON entre les parentheses
+
+    La seconde renvoyait un dict VIDE : `map_control({"action": "fly_to"})` etait
+    bien reconnu comme un appel a map_control, puis execute SANS action, donc en
+    echec. Le globe ne bougeait pas et la panne ressemblait a un outil absent.
+    """
+    blob = args_raw.strip()
+    if blob.startswith("{") and blob.endswith("}"):
+        try:
+            parsed = json.loads(blob)
+        except ValueError:
+            # jrv: pas du JSON valide malgre les accolades — on retombe sur le
+            # parsing clef=valeur ci-dessous. Cas nominal, volontairement non
+            # mappe (scripts/error_audit/scan.py).
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
     return {m.group(1): _coerce_arg(m.group(2)) for m in _ARG_RE.finditer(args_raw)}
 
 

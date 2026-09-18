@@ -21,10 +21,13 @@ class RouteEnum(StrEnum):
 
 
 # BG:PROJECT doit être testé AVANT BG pour éviter le match partiel.
-_TAG_RE = re.compile(r"^\[(I|CF|BG:PROJECT|BG)\]\s?")
+# re.IGNORECASE : un modèle local écrit « [Cf] » ou « [cf] » aussi souvent que
+# « [CF] ». Sans ça le tag ne matche pas, la route retombe sur le défaut ET la
+# balise reste affichée dans la réponse — observé en usage réel.
+_TAG_RE = re.compile(r"^\[(I|CF|BG:PROJECT|BG)\]\s?", re.IGNORECASE)
 
 # Variante sans ancre — cherche le tag n'importe où dans la fenêtre de buffer.
-_TAG_SEARCH_RE = re.compile(r"\[(I|CF|BG:PROJECT|BG)\]\s?")
+_TAG_SEARCH_RE = re.compile(r"\[(I|CF|BG:PROJECT|BG)\]\s?", re.IGNORECASE)
 
 # Filtre les tags routing inconnus courts (ex: [C], [A], [X]…)
 # Ne pas matcher [MINDMAP], [/MINDMAP] ou tout tag > 3 lettres
@@ -85,7 +88,7 @@ class SpeedRouter:
         if match:
             tag = match.group(1)
             try:
-                route = RouteEnum(tag)
+                route = RouteEnum(tag.upper())
             except ValueError:
                 collector.error("JRV-ENG-000", "JRV-ENG-000")
                 route = RouteEnum.INSTANT
@@ -98,7 +101,7 @@ class SpeedRouter:
             if search:
                 tag = search.group(1)
                 try:
-                    route = RouteEnum(tag)
+                    route = RouteEnum(tag.upper())
                 except ValueError:
                     collector.error("JRV-ENG-000", "JRV-ENG-000")
                     route = RouteEnum.INSTANT

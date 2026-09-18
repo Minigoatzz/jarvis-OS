@@ -53,8 +53,18 @@ def _flatten_content(content: object) -> str:
         if btype == "text":
             parts.append(str(block.get("text", "")))
         elif btype == "tool_use":
-            args = json.dumps(block.get("input", {}), ensure_ascii=False)
-            parts.append(f"[outil appelé] {block.get('name', '?')}({args})")
+            # Rendu VOLONTAIREMENT non ré-émettable : ni parenthèses collées au
+            # nom, ni JSON. L'ancien format `[outil appelé] nom({...})` était
+            # réinjecté ici à chaque synthèse, le modèle l'apprenait comme sa
+            # propre façon de parler et le recopiait en réponse — l'utilisateur
+            # lisait « [Cf] [outil appelé] map_control({"action": "fly_to"...}) »
+            # au lieu d'une phrase, et l'analyseur reconnaissait alors un appel
+            # sans arguments.
+            inputs = block.get("input", {})
+            detail = ""
+            if isinstance(inputs, dict) and inputs:
+                detail = " — " + ", ".join(f"{k}: {v}" for k, v in inputs.items())
+            parts.append(f"(outil {block.get('name', '?')} exécuté{detail})")
         elif btype == "tool_result":
             parts.append(f"[résultat outil] {block.get('content', '')}")
         elif "text" in block:
