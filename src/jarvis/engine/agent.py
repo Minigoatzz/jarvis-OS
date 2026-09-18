@@ -196,6 +196,66 @@ def _parse_call_args(args_raw: str) -> dict:
     return {m.group(1): _coerce_arg(m.group(2)) for m in _ARG_RE.finditer(args_raw)}
 
 
+_MENU_DESC_LIMIT = 140
+_MENU_ENUM_LIMIT = 6
+_SENTENCE_RE = re.compile(r"(.+?[.!?])(\s|$)", re.DOTALL)
+
+
+def _first_sentence(text: str, limit: int = _MENU_DESC_LIMIT) -> str:
+    """Première phrase d'une description d'outil, tronquée."""
+    first = text.strip().split("\n")[0].strip()
+    match = _SENTENCE_RE.match(first)
+    sentence = match.group(1) if match else first
+    if len(sentence) <= limit:
+        return sentence
+    return sentence[: limit - 1].rstrip() + "…"
+
+
+def _signature(schema: object) -> str:
+    """`(action=a|b, [option])` — requis nus, optionnels entre crochets.
+
+    Les valeurs d'enum sont ce dont le modèle a réellement besoin pour écrire
+    un appel valide : `action=fly_to|zoom_in|…` vaut mieux qu'un paragraphe.
+    Elles n'étaient visibles nulle part dans l'ancien menu.
+    """
+    if not isinstance(schema, dict):
+        return "()"
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return "()"
+    required = set(schema.get("required") or [])
+    parts: list[str] = []
+    for key, spec in props.items():
+        rendered = str(key)
+        if isinstance(spec, dict):
+            values = spec.get("enum")
+            if isinstance(values, list) and 0 < len(values) <= _MENU_ENUM_LIMIT:
+                rendered = f"{key}={'|'.join(str(v) for v in values)}"
+        parts.append(rendered if key in required else f"[{rendered}]")
+    return "(" + ", ".join(parts) + ")"
+
+
+def _compact_tool_menu(schemas: list[dict]) -> str:
+    """Menu d'outils minimal — une ligne par outil, signature comprise.
+
+    Mesuré le 18/09 sur les 27 outils enregistrés : le menu bâti à partir des
+    descriptions complètes pèse 13 076 caractères (~3 270 tokens), dont 3 430
+    pour le seul `fusion_360` — plus que les dix outils suivants réunis.
+    `force_tool_call` se décrivait comme « un prompt réduit au menu d'outils »
+    alors qu'il envoyait ce mur ; l'ablation qui justifiait la relance, elle,
+    utilisait un prompt réellement court. Cette version fait ~3 300 caractères
+    (~820 tokens) ET expose les enums, invisibles auparavant.
+    """
+    lines: list[str] = []
+    for schema in schemas:
+        name = str(schema.get("name", "")).strip()
+        if not name:
+            continue
+        desc = _first_sentence(str(schema.get("description", "")))
+        lines.append(f"- `{name}{_signature(schema.get('input_schema'))}` : {desc}")
+    return "\n".join(lines)
+
+
 def _clip_tool_result(text: str) -> str:
     if len(text) <= _MAX_TOOL_RESULT_CHARS:
         return text
@@ -605,16 +665,19 @@ class Agent:
         if self._tool_registry is None or not self._tool_registry.has_tools():
             return []
 
-        tool_lines = "\n".join(
-            f"- `{s['name']}` : {s['description']}" for s in self._tool_registry.schemas()
-        )
+        menu = _compact_tool_menu(self._tool_registry.schemas())
         system = (
-            "Tu déclenches des outils. Tu réponds UNIQUEMENT par la ligne "
-            "d'appel, sans phrase et sans explication.\n\n"
-            f"Outils disponibles :\n{tool_lines}\n\n"
-            "Format exact, sur une seule ligne :\n"
+            "Tu es un routeur d'outils. L'utilisateur vient de demander une "
+            "action. Ta seule sortie est la ligne d'appel : pas de phrase, pas "
+            "d'explication, pas de bloc de code.\n\n"
+            f"Outils :\n{menu}\n\n"
+            "Forme attendue, sur une seule ligne :\n"
             'nom_outil(argument="valeur")\n\n'
-            "Si aucun outil ne convient, réponds exactement : AUCUN"
+            "Exemple \u2014 pour \u00ab montre moi Reykjavik \u00bb :\n"
+            'map_control(action="fly_to", location="Reykjavik")\n\n'
+            "Les arguments viennent du message de l'utilisateur, jamais de "
+            "l'exemple. \u00c9cris UNIQUEMENT la ligne d'appel. Si et seulement "
+            "si aucun outil de la liste ne peut r\u00e9pondre, \u00e9cris : AUCUN"
         )
 
         try:
@@ -631,7 +694,18 @@ class Agent:
             return []
 
         text = result if isinstance(result, str) else ""
-        return self.extract_text_tool_calls(text)
+        calls = self.extract_text_tool_calls(text)
+        if not calls:
+            # Sans cette trace, l'échec de la relance était MUET : le log ne
+            # disait que « Aucun outil déclenché », jamais ce que le modèle
+            # avait répondu. Impossible de distinguer « il a écrit AUCUN » de
+            # « il a écrit un appel que l'analyseur refuse » — deux pannes aux
+            # correctifs opposés. f-string volontaire : le format loguru du
+            # projet n'affiche pas les kwargs.
+            logger.warning(
+                f"Relance outil sans appel exploitable — brut : {text.strip()[:200]!r}"
+            )
+        return calls
 
     async def execute_captured_tools(self, capture: ToolCapture) -> list[str]:
         """Exécute en parallèle les tool_use capturés et retourne les résultats bruts."""

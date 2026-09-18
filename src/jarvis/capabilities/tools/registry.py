@@ -100,7 +100,10 @@ class ToolRegistry:
                     content=_prefix_error_content(code, result.content),
                     is_error=True,
                 )
-            logger.info("Tool executed", name=name, is_error=result.is_error)
+            # f-string et non kwargs : le format de log du projet ne rend pas
+            # les kwargs loguru, et "Tool executed" sans nom d'outil ne permet
+            # pas de savoir ce qui a réellement tourné.
+            logger.info(f"Tool executed: {name}")
             return result
         except Exception as e:
             collector.error(code, f"Tool {name} failed", cause=e)

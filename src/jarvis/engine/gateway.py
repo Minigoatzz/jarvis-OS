@@ -235,7 +235,7 @@ class Gateway:
                 # Second appel LLM pour synthétiser les résultats — avant "done"
                 try:
                     results = await tool_task
-                    logger.debug("CF tools done", names=[n for _, n, _ in tool_capture.calls])
+                    logger.debug(f"CF tools done: {[n for _, n, _ in tool_capture.calls]}")
                     if emitted and ack_text.strip():
                         yield " "
                     synth_stream = agent.synthesize(session, ack_text, tool_capture, results)
