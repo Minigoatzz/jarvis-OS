@@ -28,6 +28,10 @@ _SENSITIVE_KEYS = {
     "NOTION_TOKEN",
     "MISTRAL_API_KEY",
     "AISSTREAM_KEY",
+    # Rendus éditables depuis l'UI : le globe ne démarre pas sans eux et ils
+    # n'existaient que dans .env.example — il fallait éditer le fichier à la main.
+    "MAPBOX_TOKEN",
+    "MAPTILER_KEY",
     "SPOTIFY_CLIENT_ID",
     "SPOTIFY_CLIENT_SECRET",
     "DEEZER_APP_ID",
@@ -103,6 +107,17 @@ _SETTINGS_FIELD_MAP: dict[str, str] = {
     "OLLAMA_BASE_URL": "ollama_base_url",
     "HOME_ASSISTANT_URL": "home_assistant_url",
     "HOME_ASSISTANT_TOKEN": "home_assistant_token",
+    # Cartographie (globe) — appliqués à chaud, /api/globe/config les relit
+    # à chaque chargement de la vue.
+    "MAPBOX_TOKEN": "mapbox_token",
+    "MAPTILER_KEY": "maptiler_key",
+    # Ces quatre-là étaient éditables dans l'UI sans être ni appliquées à
+    # chaud ni listées dans _RESTART_KEYS : la valeur partait dans .env, le
+    # processus vivant gardait l'ancienne, et rien ne le signalait.
+    "AISSTREAM_KEY": "aisstream_key",
+    "GOOGLE_API_KEY": "google_api_key",
+    "MISTRAL_API_KEY": "mistral_api_key",
+    "NOTION_TOKEN": "notion_token",
 }
 
 
