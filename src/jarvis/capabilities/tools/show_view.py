@@ -7,9 +7,70 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import httpx
+import yaml
 
 from jarvis.capabilities.tools.base import Tool, ToolResult
 from jarvis.kernel.error_collector import collector  # jrv: autofix
+from jarvis.kernel.paths import SKILLS_INSTALLED_DIR, UI_STATIC_DIR
+
+# Le modèle nomme les vues comme l'utilisateur les appelle — « cockpit »,
+# « météo » — jamais par leur identifiant technique. Sans cette table il passait
+# view_id="cockpit" : `Jarvis.views.activate()` ne trouve rien et sort en
+# silence, pendant que l'outil répondait « Vue cockpit affichée ».
+_VIEW_ALIASES: dict[str, str] = {
+    "cockpit": "system-monitor",
+    "systeme": "system-monitor",
+    "système": "system-monitor",
+    "system": "system-monitor",
+    "moniteur": "system-monitor",
+    "monitor": "system-monitor",
+    "meteo": "weather",
+    "météo": "weather",
+    "horloge": "clock",
+    "carte": "globe",
+    "map": "globe",
+    "terre": "globe",
+    "monde": "globe",
+    # Le manifeste du skill se nomme `globe-view`, l'id client est `globe`.
+    "globe-view": "globe",
+}
+
+
+def _available_views() -> list[str]:
+    """IDs de vues que la page peut réellement activer.
+
+    Mêmes deux conditions que /api/skills/view-scripts, qui décide de ce que
+    home.html charge : un `view.js` servi ET un manifeste installé de type
+    `view`. Lire le disque plutôt que maintenir une liste en dur évite qu'elle
+    dérive silencieusement d'une installation à l'autre.
+    """
+    try:
+        entries = sorted((UI_STATIC_DIR / "skills").iterdir())
+    except OSError:
+        # jrv: répertoire absent (install partielle) — on ne peut rien valider,
+        # l'appelant laisse alors passer. Volontairement non mappé.
+        return []
+
+    found: list[str] = []
+    for folder in entries:
+        if not folder.is_dir() or not (folder / "view.js").exists():
+            continue
+        manifest = SKILLS_INSTALLED_DIR / folder.name / "skill.yaml"
+        if not manifest.exists():
+            continue
+        try:
+            meta = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            # jrv: manifeste illisible — la vue est simplement ignorée, comme
+            # le fait /api/skills/view-scripts. Volontairement non mappé.
+            continue
+        if meta.get("type") == "view":
+            found.append(folder.name)
+    return found
+
+
+def _resolve_view_id(view_id: str) -> str:
+    return _VIEW_ALIASES.get(view_id.strip().lower(), view_id.strip())
 
 CITY_COORDS: dict[str, tuple[float, float]] = {
     # Villes françaises
@@ -170,6 +231,20 @@ class ShowViewTool(Tool):
             return ToolResult(
                 content=f"Paramètre view_id requis pour action={action}.", is_error=True
             )
+
+        if action in ("show", "hide", "view_command") and view_id:
+            view_id = _resolve_view_id(view_id)
+            available = _available_views()
+            # `available` vide = rien à valider (install partielle) : on laisse
+            # passer plutôt que de tout bloquer sur une lecture disque ratée.
+            if available and view_id not in available:
+                return ToolResult(
+                    content=(
+                        f"Vue « {view_id} » inconnue — rien n'a été affiché. "
+                        f"Vues disponibles : {', '.join(available)}."
+                    ),
+                    is_error=True,
+                )
 
         if action == "show":
             self._broadcast({"type": "show_view", "view_id": view_id})
