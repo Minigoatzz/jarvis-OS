@@ -702,11 +702,18 @@ class Agent:
             f"Outils :\n{menu}\n\n"
             "Forme attendue, sur une seule ligne :\n"
             'nom_outil(argument="valeur")\n\n'
-            "Exemple \u2014 pour \u00ab montre moi Reykjavik \u00bb :\n"
-            'map_control(action="fly_to", location="Reykjavik")\n\n'
-            "Les arguments viennent du message de l'utilisateur, jamais de "
-            "l'exemple. \u00c9cris UNIQUEMENT la ligne d'appel. Si et seulement "
-            "si aucun outil de la liste ne peut r\u00e9pondre, \u00e9cris : AUCUN"
+            # AUCUN exemple avec une valeur concrete ici. Un exemple
+            # « map_control(action="fly_to", location="Reykjavik") » a ete
+            # ajoute le 18/09 puis retire le 19 : le modele a recopie
+            # « Reykjavik » comme argument d'un AUTRE outil, et « montre moi la
+            # meteo » a repondu la meteo de Reykjavik. La phrase « les arguments
+            # viennent du message de l'utilisateur » ne l'en a pas empeche.
+            # Les signatures du menu ci-dessus (noms d'arguments + valeurs
+            # d'enum) enseignent la forme sans offrir un seul litteral copiable.
+            "Toutes les valeurs viennent du message de l'utilisateur : ne copie "
+            "aucune valeur venue d'ailleurs que de ce message.\n"
+            "\u00c9cris UNIQUEMENT la ligne d'appel. Si et seulement si aucun "
+            "outil de la liste ne peut r\u00e9pondre, \u00e9cris : AUCUN"
         )
 
         try:

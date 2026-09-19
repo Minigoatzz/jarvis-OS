@@ -26,7 +26,9 @@ les correctifs sont opposés.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import re
 
 import pytest
 
@@ -55,6 +57,29 @@ def _schemas() -> list[dict]:
         },
         {"name": "fusion_360", "description": _FUSION_LIKE, "input_schema": {}},
     ]
+
+
+def _rendered_retry_prompt() -> str:
+    """Le prompt système réellement envoyé par `force_tool_call`."""
+    captured: dict[str, str] = {}
+
+    class _LLM:
+        async def complete(self, messages, system, stream=False, **kw):
+            captured["system"] = system
+            return "AUCUN"
+
+    class _Registry:
+        def has_tools(self) -> bool:
+            return True
+
+        def schemas(self) -> list[dict]:
+            return _schemas()
+
+    agent = Agent.__new__(Agent)
+    agent._tool_registry = _Registry()
+    agent._llm = _LLM()
+    asyncio.run(Agent.force_tool_call(agent, "montre moi la météo"))
+    return captured["system"]
 
 
 # ── _first_sentence ─────────────────────────────────────────────────────────
@@ -153,20 +178,42 @@ def test_force_tool_call_logs_when_the_retry_comes_back_empty() -> None:
     assert "brut" in src, "…avec la réponse brute du modèle, sinon on ne sait rien"
 
 
-def test_force_tool_call_example_does_not_reuse_a_likely_real_request() -> None:
-    """L'écho est la panne récurrente du projet : le modèle recopie l'exemple.
+def test_retry_prompt_contains_no_copyable_literal_value() -> None:
+    """Le 18/09 j'ai mis « map_control(action="fly_to", location="Reykjavik") »
+    en exemple dans ce prompt. Le 19, « montre moi la météo » a répondu la
+    météo de Reykjavik : le modèle avait recopié le littéral comme argument
+    d'un AUTRE outil. La phrase « les arguments viennent du message de
+    l'utilisateur » ne l'a pas empêché.
 
-    L'exemple du prompt doit donc porter un lieu improbable en usage réel, pas
-    « Paris » ni « la tour Eiffel » — précisément ce que l'utilisateur demande.
+    Le test précédent interdisait « shanghai », « montréal », « tour eiffel » —
+    donc il EXIGEAIT qu'un autre nom de lieu réel occupe la place. Il rendait
+    la panne permanente au lieu de l'empêcher.
+
+    L'invariant correct ne porte sur aucune ville en particulier : le prompt de
+    relance ne doit contenir AUCUNE valeur littérale copiable. Seuls les
+    marqueurs manifestement génériques sont tolérés.
     """
-    src = inspect.getsource(Agent.force_tool_call)
-    lowered = src.lower()
+    system = _rendered_retry_prompt()
 
-    for bait in ("tour eiffel", "shanghai", "montréal", "whistler"):
-        assert bait not in lowered, (
-            f"« {bait} » sert d'exemple dans le prompt de relance — "
-            "le modèle peut le recopier au lieu d'utiliser la vraie demande."
-        )
+    placeholders = {"valeur"}
+    literals = {m.group(1) for m in re.finditer(r'="([^"]*)"', system)}
+
+    assert literals <= placeholders, (
+        f"valeurs littérales copiables dans le prompt de relance : "
+        f"{sorted(literals - placeholders)} — le modèle les recopiera comme "
+        "arguments, y compris pour un autre outil."
+    )
+
+
+def test_retry_prompt_still_teaches_the_call_shape() -> None:
+    """Retirer l'exemple ne doit pas retirer la forme."""
+    system = _rendered_retry_prompt()
+
+    assert 'nom_outil(argument="valeur")' in system
+    assert "action=fly_to" in system, (
+        "les signatures du menu remplacent l'exemple : sans les enums, le "
+        "modèle n'a plus rien pour écrire un appel valide."
+    )
 
 
 if __name__ == "__main__":
