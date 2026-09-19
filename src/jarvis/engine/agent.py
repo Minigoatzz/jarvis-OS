@@ -48,6 +48,35 @@ _COMPLETION_CLAIM_RE = re.compile(
 )
 
 
+# Un jeton entre crochets, seul sur la ligne : « [Cockpit] », « [Globe] ».
+# Pas d'espace à l'intérieur — « [MINDMAP] ceci est du contenu » reste du
+# contenu légitime et ne doit PAS être capturé ici.
+_BRACKET_ONLY_RE = re.compile(r"^\[[^\]\s]{1,24}\]$")
+
+
+def is_degenerate_reply(text: str) -> bool:
+    """True si la réponse n'est pas une réponse — vide, ou un tag nu.
+
+    Observé le 18/09 : « montre moi la tour eiffel » a renvoyé exactement
+    « [Cockpit] », rien d'autre. Le modèle a appris du prompt que les réponses
+    commencent par « [TAG] » ; faute de savoir quoi faire, il émet un jeton
+    entre crochets et s'arrête. `_ANY_TAG_RE` (router.py) ne filtre que les
+    tags COURTS en MAJUSCULES — `[C]`, `[A]` — pour épargner du contenu réel
+    comme `[MINDMAP]`. « [Cockpit] » fait sept lettres : il traverse.
+
+    Aucun garde-fou existant ne l'attrapait : la route retombe sur [I] faute
+    de tag valide, et `claims_completion("[Cockpit]")` est faux. La sortie
+    partait donc telle quelle à l'utilisateur.
+
+    C'est la même panne que « [outil appelé] » et que les accusés de réception
+    « [BG:PROJECT] » : le modèle recopie une notation à crochets vue ailleurs.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return bool(_BRACKET_ONLY_RE.match(stripped))
+
+
 def claims_completion(text: str) -> bool:
     """True si la réponse affirme qu'une action a été effectuée.
 

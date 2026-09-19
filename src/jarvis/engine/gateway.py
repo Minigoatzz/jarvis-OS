@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 
 from loguru import logger
 
-from jarvis.engine.agent import Agent, claims_completion
+from jarvis.engine.agent import Agent, claims_completion, is_degenerate_reply
 from jarvis.engine.background.notifications import NotificationQueue
 from jarvis.engine.background.worker import BackgroundWorker
 from jarvis.engine.llm_errors import friendly_llm_error
@@ -185,10 +185,14 @@ class Gateway:
                 # affiché. » sortait sans qu'aucun outil n'ait tourné (zéro
                 # `Tool executed` dans api.log sur ce tour).
                 asserts_action = claims_completion(ack_text)
+                # Une réponse dégénérée (« [Cockpit] », ou vide) n'affirme rien
+                # et ne porte aucun tag valide : elle échappait aux deux
+                # déclencheurs ci-dessous et sortait brute à l'utilisateur.
+                degenerate = is_degenerate_reply(agent.strip_text_tool_calls(ack_text))
                 if (
                     tool_task is None
                     and tool_capture is not None
-                    and (route is RouteEnum.CONFIRM_FIRE or asserts_action)
+                    and (route is RouteEnum.CONFIRM_FIRE or asserts_action or degenerate)
                 ):
                     forced = await agent.force_tool_call(message)
                     if forced:
@@ -227,6 +231,18 @@ class Gateway:
                             "Je n'ai pas réussi à déclencher l'action — aucun outil "
                             "n'a été exécuté, donc rien n'a changé. Reformule ta "
                             "demande et je réessaie."
+                        )
+                        return
+                    # « [Cockpit] » tout seul : ce n'est pas une réponse. La
+                    # rendre telle quelle donne à l'utilisateur un jeton brut
+                    # sans rien lui dire de ce qui a échoué.
+                    if is_degenerate_reply(text):
+                        logger.warning(
+                            f"Réponse dégénérée remplacée — brut : {text.strip()[:80]!r}"
+                        )
+                        yield (
+                            "Je n'ai rien produit d'exploitable sur ce tour et aucun "
+                            "outil n'a tourné. Reformule ta demande et je réessaie."
                         )
                         return
                     yield text
