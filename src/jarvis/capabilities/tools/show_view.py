@@ -138,6 +138,34 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
 }
 
 
+def _zoom_for_rank(rank: int | None) -> int | None:
+    """Zoom Mapbox adapté à la précision d'un résultat Nominatim.
+
+    `place_rank` (Nominatim) : 4 pays, 8 région, 12 comté, 16 ville,
+    18-25 quartier/village, 26-27 rue, 28-30 adresse/bâtiment/lieu précis.
+    None (table locale, rang illisible) : l'appelant garde son zoom.
+    """
+    if rank is None:
+        return None
+    for ceiling, zoom in ((4, 4), (8, 6), (12, 8), (16, 11), (20, 13), (25, 14), (27, 16)):
+        if rank <= ceiling:
+            return zoom
+    return 17
+
+
+def _precision_note(location: str, rank: int | None) -> str:
+    """Dit honnêtement quand une adresse n'a été trouvée qu'en partie.
+
+    Sans ça, « 655 rue X » résolu seulement au niveau de la rue ou du secteur
+    s'annonçait « Navigation vers 655 rue X. » — une précision inventée.
+    """
+    if rank is None or not any(ch.isdigit() for ch in location) or rank >= 28:
+        return ""
+    if rank >= 26:
+        return " Numéro introuvable : j'affiche la rue."
+    return " Adresse introuvable : j'affiche le secteur le plus proche."
+
+
 class ShowViewTool(Tool):
     name = "show_view"
     description = (
@@ -225,7 +253,7 @@ class ShowViewTool(Tool):
         action: str,
         view_id: str | None = None,
         location: str | None = None,
-        zoom: int = 10,
+        zoom: int | None = None,
         command: str | None = None,
         params: dict | None = None,
         **_: object,
@@ -267,7 +295,12 @@ class ShowViewTool(Tool):
             coords = await self._geocode(location)
             if not coords:
                 return ToolResult(content=f"Lieu introuvable : {location}", is_error=True)
-            lat, lon = coords
+            lat, lon, rank = coords
+            # La précision trouvée par le géocodeur décide du zoom : le modèle
+            # ne passe presque jamais `zoom`, et le défaut fixe de 10 (vue
+            # « ville ») montrait toute la région pour une adresse précise.
+            rank_zoom = _zoom_for_rank(rank)
+            final_zoom = rank_zoom if rank_zoom is not None else (zoom if zoom is not None else 10)
             self._broadcast({"type": "show_view", "view_id": "globe"})
             self._broadcast(
                 {
@@ -277,12 +310,12 @@ class ShowViewTool(Tool):
                     "params": {
                         "lat": lat,
                         "lon": lon,
-                        "zoom": max(2, min(18, zoom)),
+                        "zoom": max(2, min(18, final_zoom)),
                         "location_name": location,
                     },
                 }
             )
-            return ToolResult(content=f"Navigation vers {location}.")
+            return ToolResult(content=f"Navigation vers {location}.{_precision_note(location, rank)}")
 
         if action == "zoom_out":
             self._broadcast(
@@ -318,10 +351,12 @@ class ShowViewTool(Tool):
 
         return ToolResult(content=f"Action inconnue : {action}", is_error=True)
 
-    async def _geocode(self, location: str) -> tuple[float, float] | None:
+    async def _geocode(self, location: str) -> tuple[float, float, int | None] | None:
+        """(lat, lon, place_rank) — le rang vaut None pour la table locale."""
         key = location.lower().strip()
         if key in CITY_COORDS:
-            return CITY_COORDS[key]
+            lat, lon = CITY_COORDS[key]
+            return lat, lon, None
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 r = await client.get(
@@ -331,8 +366,15 @@ class ShowViewTool(Tool):
                 )
                 results = r.json()
                 if results:
-                    return float(results[0]["lat"]), float(results[0]["lon"])
-        except Exception:
-            collector.error("JRV-TOL-001", "JRV-TOL-001")
-            pass
+                    first = results[0]
+                    try:
+                        rank: int | None = int(first.get("place_rank"))
+                    except (TypeError, ValueError):
+                        # jrv: rang absent ou illisible — on garde le lieu, le
+                        # zoom retombera sur la valeur par défaut. Volontairement
+                        # non mappé (scripts/error_audit/scan.py).
+                        rank = None
+                    return float(first["lat"]), float(first["lon"]), rank
+        except Exception as e:
+            collector.error("JRV-TOL-001", f"Géocodage Nominatim échoué pour {location!r} : {e}")
         return None
