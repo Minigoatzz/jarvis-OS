@@ -178,8 +178,15 @@ def test_menu_ignores_nameless_tools() -> None:
 
 
 def test_force_tool_call_uses_the_compact_menu() -> None:
-    """Régression : le menu ne doit plus être bâti sur `s['description']`."""
-    src = inspect.getsource(Agent.force_tool_call)
+    """Régression : le menu ne doit plus être bâti sur `s['description']`.
+
+    Depuis le 21/09 le prompt est construit par `build_retry_prompt` (partagé
+    avec scripts/diag_retry_prompt.py) : on vérifie les deux maillons.
+    """
+    from jarvis.engine.agent import build_retry_prompt
+
+    assert "build_retry_prompt(" in inspect.getsource(Agent.force_tool_call)
+    src = inspect.getsource(build_retry_prompt)
 
     assert "_compact_tool_menu" in src
     assert "s['description']" not in src, (

@@ -318,6 +318,52 @@ def _compact_tool_menu(schemas: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_RETRY_PLACE_RULES = (
+    "R\u00e8gles :\n"
+    "- Un lieu r\u00e9el (ville, pays, monument, adresse) : show_view avec "
+    "action=fly_to et location = le lieu exactement comme l'utilisateur l'a "
+    "\u00e9crit, sans le traduire.\n"
+    "- show_view avec action=show ouvre un \u00e9cran de Jarvis (horloge, "
+    "m\u00e9t\u00e9o, cockpit, globe). Jamais un lieu.\n\n"
+)
+
+
+def build_retry_prompt(schemas: list[dict], *, place_rules: bool = False) -> str:
+    """Prompt système de `Agent.force_tool_call` — source unique.
+
+    Partagé avec scripts/diag_retry_prompt.py : le diagnostic mesure
+    EXACTEMENT ce que Jarvis envoie, pas une copie qui divergerait.
+
+    `place_rules` : variante mesurée le 21/09. Log de ce jour-là : 5 relances
+    sur 5 ont traduit « montre-moi <lieu> » en `show_view(action="show")` —
+    view_id vide, puis le lieu glissé dans view_id (« paris », « three-rivers »).
+    Le prompt principal porte la règle des lieux ; celui-ci n'en avait aucune.
+    Désactivée par défaut tant que le diagnostic n'a pas montré qu'elle aide
+    sur le vrai modèle : trois retouches de ce prompt faites à l'intuition ont
+    chacune introduit un défaut.
+
+    AUCUN exemple avec une valeur concrète : un exemple
+    « map_control(action="fly_to", location="Reykjavik") » ajouté le 18/09 a
+    été recopié comme argument d'un AUTRE outil (« montre moi la météo » →
+    météo de Reykjavik). Les signatures du menu (noms d'arguments + valeurs
+    d'enum) enseignent la forme sans offrir de littéral copiable.
+    """
+    menu = _compact_tool_menu(schemas)
+    return (
+        "Tu es un routeur d'outils. L'utilisateur vient de demander une "
+        "action. Ta seule sortie est la ligne d'appel : pas de phrase, pas "
+        "d'explication, pas de bloc de code.\n\n"
+        f"Outils :\n{menu}\n\n"
+        + (_RETRY_PLACE_RULES if place_rules else "")
+        + "Forme attendue, sur une seule ligne :\n"
+        'nom_outil(argument="valeur")\n\n'
+        "Toutes les valeurs viennent du message de l'utilisateur : ne copie "
+        "aucune valeur venue d'ailleurs que de ce message.\n"
+        "\u00c9cris UNIQUEMENT la ligne d'appel. Si et seulement si aucun "
+        "outil de la liste ne peut r\u00e9pondre, \u00e9cris : AUCUN"
+    )
+
+
 def _clip_tool_result(text: str) -> str:
     if len(text) <= _MAX_TOOL_RESULT_CHARS:
         return text
@@ -727,27 +773,7 @@ class Agent:
         if self._tool_registry is None or not self._tool_registry.has_tools():
             return []
 
-        menu = _compact_tool_menu(self._tool_registry.schemas())
-        system = (
-            "Tu es un routeur d'outils. L'utilisateur vient de demander une "
-            "action. Ta seule sortie est la ligne d'appel : pas de phrase, pas "
-            "d'explication, pas de bloc de code.\n\n"
-            f"Outils :\n{menu}\n\n"
-            "Forme attendue, sur une seule ligne :\n"
-            'nom_outil(argument="valeur")\n\n'
-            # AUCUN exemple avec une valeur concrete ici. Un exemple
-            # « map_control(action="fly_to", location="Reykjavik") » a ete
-            # ajoute le 18/09 puis retire le 19 : le modele a recopie
-            # « Reykjavik » comme argument d'un AUTRE outil, et « montre moi la
-            # meteo » a repondu la meteo de Reykjavik. La phrase « les arguments
-            # viennent du message de l'utilisateur » ne l'en a pas empeche.
-            # Les signatures du menu ci-dessus (noms d'arguments + valeurs
-            # d'enum) enseignent la forme sans offrir un seul litteral copiable.
-            "Toutes les valeurs viennent du message de l'utilisateur : ne copie "
-            "aucune valeur venue d'ailleurs que de ce message.\n"
-            "\u00c9cris UNIQUEMENT la ligne d'appel. Si et seulement si aucun "
-            "outil de la liste ne peut r\u00e9pondre, \u00e9cris : AUCUN"
-        )
+        system = build_retry_prompt(self._tool_registry.schemas())
 
         try:
             result = await self._llm.complete(
