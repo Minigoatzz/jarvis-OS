@@ -123,10 +123,29 @@ def test_signature_survives_garbage_schemas() -> None:
         assert _signature(bad) == "()"
 
 
-def test_signature_drops_oversized_enums() -> None:
-    """Un enum de 20 valeurs rallongerait le menu au lieu de l'aider."""
-    schema = {"properties": {"a": {"enum": list(range(20))}}, "required": ["a"]}
-    assert _signature(schema) == "(a)"
+def test_signature_drops_oversized_enums_on_optional_arguments_only() -> None:
+    """Un enum optionnel de 20 valeurs rallongerait le menu sans aider."""
+    schema = {"properties": {"a": {"enum": list(range(20))}}}
+    assert _signature(schema) == "([a])"
+
+
+def test_signature_always_lists_the_values_of_a_required_argument() -> None:
+    """Régression du 21/09. Le plafond s'appliquait AUSSI aux arguments requis :
+    show_view a 8 actions, plafond 6, donc la relance montrait `show_view(action,
+    ...)` sans aucune valeur permise. Le modèle a deviné « display », puis
+    « show » sans view_id — deux échecs, et « Montre-moi Montréal » n'a rien
+    fait. La valeur qu'on DOIT choisir ne peut pas être masquée."""
+    actions = ["show", "hide", "home", "fly_to", "zoom_out", "zoom_in", "globe_view", "view_command"]
+    schema = {"properties": {"action": {"enum": actions}}, "required": ["action"]}
+    assert _signature(schema) == "(action=" + "|".join(actions) + ")"
+
+
+def test_real_show_view_menu_line_exposes_fly_to() -> None:
+    """Le cas exact, sur le vrai schéma de l'outil."""
+    from jarvis.capabilities.tools.show_view import ShowViewTool
+
+    line = _compact_tool_menu([ShowViewTool(broadcast_event=lambda e: None).to_claude_schema()])
+    assert "action=show|" in line and "fly_to" in line, line
 
 
 # ── _compact_tool_menu ──────────────────────────────────────────────────────

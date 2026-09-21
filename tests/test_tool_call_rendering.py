@@ -419,15 +419,50 @@ def test_jrv_prefix_is_recognised_as_a_failure() -> None:
     assert not _is_tool_error("[INFO] rien à signaler")
 
 
+class _OkVolume(Tool):
+    name = "volume_control"
+    description = "Règle le volume."
+    input_schema = {
+        "type": "object",
+        "properties": {"action": {"type": "string"}},
+        "required": ["action"],
+    }
+
+    async def execute(self, **kwargs: object) -> ToolResult:
+        return ToolResult(content="Volume monté.")
+
+
+def _gateway_with_tools(tools: list[Tool], first_pass: str, synth: str) -> tuple[Gateway, _FakeLLM]:
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register(tool)
+    llm = _FakeLLM(first_pass, synth)
+    agent = Agent(settings=settings, llm=llm, tool_registry=registry)  # type: ignore[arg-type]
+    gateway = Gateway(
+        session_manager=SessionManager(),
+        agent=agent,
+        notifications=NotificationQueue(),
+        worker=None,  # type: ignore[arg-type]
+    )
+    return gateway, llm
+
+
+# Échec PARTIEL : un outil réussit, l'autre échoue. C'est le seul cas où la
+# synthèse libre tourne encore — depuis le 21/09, un échec TOTAL est annoncé
+# par le code sans passer par le modèle (test_total_failure_* ci-dessous).
+_PARTIAL = (
+    '[CF] volume_control(action="up") '
+    'spotify_control(action="search_playlist", query="unplugged alice in chains")'
+)
+
+
 @pytest.mark.asyncio
 async def test_failed_tool_is_flagged_is_error_in_the_synthesis_blocks() -> None:
-    gateway, llm = _gateway_with(
-        _FailingSpotify(),
-        '[CF] spotify_control(action="search_playlist", query="unplugged alice in chains")',
-        synth="Je n'ai pas pu lancer la playlist.",
+    gateway, llm = _gateway_with_tools(
+        [_OkVolume(), _FailingSpotify()], _PARTIAL, synth="Volume monté, playlist en échec."
     )
 
-    await _run(gateway, "joue l'album unplugged d'alice in chains")
+    await _run(gateway, "monte le son et joue unplugged d'alice in chains")
 
     blocks = [
         block
@@ -436,22 +471,39 @@ async def test_failed_tool_is_flagged_is_error_in_the_synthesis_blocks() -> None
         for block in message["content"]
         if isinstance(block, dict) and block.get("type") == "tool_result"
     ]
-    assert blocks, "la synthèse doit recevoir un tool_result"
-    assert all(block["is_error"] for block in blocks), "l'échec n'est pas signalé au modèle"
+    assert len(blocks) == 2, "la synthèse doit recevoir les deux tool_result"
+    assert sum(1 for block in blocks if block["is_error"]) == 1, (
+        "seul l'outil en échec doit être marqué is_error"
+    )
 
 
 @pytest.mark.asyncio
 async def test_failed_tool_adds_a_do_not_claim_success_directive() -> None:
-    gateway, llm = _gateway_with(
-        _FailingSpotify(),
-        '[CF] spotify_control(action="search_playlist", query="unplugged alice in chains")',
-        synth="Je n'ai pas pu lancer la playlist.",
+    gateway, llm = _gateway_with_tools(
+        [_OkVolume(), _FailingSpotify()], _PARTIAL, synth="Volume monté, playlist en échec."
     )
 
-    await _run(gateway, "joue l'album unplugged d'alice in chains")
+    await _run(gateway, "monte le son et joue unplugged d'alice in chains")
 
     assert "UN OUTIL VIENT D'ÉCHOUER" in llm.seen_synth_system
     assert "N'A PAS EU LIEU" in llm.seen_synth_system
+
+
+@pytest.mark.asyncio
+async def test_total_failure_never_reaches_the_free_synthesis() -> None:
+    """Log du 21/09 07:19 : outil en échec, synthèse « C'est lancé ». Plus jamais."""
+    gateway, llm = _gateway_with(
+        _FailingSpotify(),
+        '[CF] spotify_control(action="search_playlist", query="unplugged alice in chains")',
+        synth="C'est lancé !",  # ce que le modèle aurait écrit
+    )
+
+    out = await _run(gateway, "joue l'album unplugged d'alice in chains")
+
+    assert llm.seen_synth_system == "", "la synthèse libre ne doit pas être appelée"
+    assert "C'est lancé" not in out
+    assert "rien n'a changé" in out
+    assert "impossible de lancer (404)" in out, "la vraie raison doit être donnée"
 
 
 @pytest.mark.asyncio

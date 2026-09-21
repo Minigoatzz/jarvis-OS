@@ -9,7 +9,12 @@ from collections.abc import AsyncIterator
 
 from loguru import logger
 
-from jarvis.engine.agent import Agent, claims_completion, is_degenerate_reply
+from jarvis.engine.agent import (
+    Agent,
+    all_tools_failed_message,
+    claims_completion,
+    is_degenerate_reply,
+)
 from jarvis.engine.background.notifications import NotificationQueue
 from jarvis.engine.background.worker import BackgroundWorker
 from jarvis.engine.llm_errors import friendly_llm_error
@@ -254,6 +259,15 @@ class Gateway:
                     logger.debug(f"CF tools done: {[n for _, n, _ in tool_capture.calls]}")
                     if emitted and ack_text.strip():
                         yield " "
+                    # Échec total : pas de synthèse libre. Le modèle écrivait
+                    # « C'est lancé » par-dessus une erreur (log du 21/09 07:19).
+                    failed = all_tools_failed_message(
+                        [n for _, n, _ in tool_capture.calls], list(results)
+                    )
+                    if failed is not None:
+                        logger.warning(f"Tous les outils ont échoué — {failed}")
+                        yield failed
+                        return
                     synth_stream = agent.synthesize(session, ack_text, tool_capture, results)
                     _, clean_synth = await SpeedRouter.extract_route(synth_stream)
                     async for chunk in clean_synth:

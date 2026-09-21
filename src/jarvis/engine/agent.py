@@ -77,6 +77,31 @@ def is_degenerate_reply(text: str) -> bool:
     return bool(_BRACKET_ONLY_RE.match(stripped))
 
 
+_JRV_PREFIX_RE = re.compile(r"^\[JRV-[A-Z]+-\d+\]\s*")
+
+
+def all_tools_failed_message(names: list[str], results: list[str]) -> str | None:
+    """Réponse honnête quand CHAQUE outil du tour a échoué, sinon None.
+
+    Observé le 21/09 à 07:19 : « Montre-moi Montréal » → show_view a renvoyé
+    une erreur, et la synthèse a répondu « C'est lancé, on est sur Montréal. »
+    La consigne « UN OUTIL VIENT D'ÉCHOUER » ajoutée au prompt de synthèse
+    n'a pas suffi : on ne demande plus au modèle de résumer un échec total,
+    on le dit nous-mêmes. Un succès partiel reste confié à la synthèse.
+    """
+    if not results or not all(_is_tool_error(r) for r in results):
+        return None
+    reasons = []
+    for name, result in zip(names, results):
+        reason = _JRV_PREFIX_RE.sub("", result.strip()).strip() or "erreur sans détail"
+        reasons.append(f"{name} : {reason}")
+    return (
+        "Ça n'a pas marché, rien n'a changé — "
+        + " ; ".join(reasons)
+        + ". Reformule et je réessaie."
+    )
+
+
 def claims_completion(text: str) -> bool:
     """True si la réponse affirme qu'une action a été effectuée.
 
@@ -258,7 +283,15 @@ def _signature(schema: object) -> str:
         rendered = str(key)
         if isinstance(spec, dict):
             values = spec.get("enum")
-            if isinstance(values, list) and 0 < len(values) <= _MENU_ENUM_LIMIT:
+            # Un argument REQUIS garde toujours sa liste complète : c'est la
+            # valeur que le modèle DOIT choisir. Le plafond ne vaut que pour
+            # les optionnels. Régression du 21/09 : show_view a 8 actions, le
+            # plafond de 6 les masquait toutes, et la relance montrait
+            # `show_view(action, ...)` sans aucune valeur permise. Le modèle
+            # devinait (« display », « show » sans view_id) et l'outil échouait.
+            if isinstance(values, list) and values and (
+                key in required or len(values) <= _MENU_ENUM_LIMIT
+            ):
                 rendered = f"{key}={'|'.join(str(v) for v in values)}"
         parts.append(rendered if key in required else f"[{rendered}]")
     return "(" + ", ".join(parts) + ")"
