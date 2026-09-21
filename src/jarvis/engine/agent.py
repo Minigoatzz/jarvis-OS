@@ -328,7 +328,7 @@ _RETRY_PLACE_RULES = (
 )
 
 
-def build_retry_prompt(schemas: list[dict], *, place_rules: bool = False) -> str:
+def build_retry_prompt(schemas: list[dict], *, place_rules: bool = True) -> str:
     """Prompt système de `Agent.force_tool_call` — source unique.
 
     Partagé avec scripts/diag_retry_prompt.py : le diagnostic mesure
@@ -338,9 +338,13 @@ def build_retry_prompt(schemas: list[dict], *, place_rules: bool = False) -> str
     sur 5 ont traduit « montre-moi <lieu> » en `show_view(action="show")` —
     view_id vide, puis le lieu glissé dans view_id (« paris », « three-rivers »).
     Le prompt principal porte la règle des lieux ; celui-ci n'en avait aucune.
-    Désactivée par défaut tant que le diagnostic n'a pas montré qu'elle aide
-    sur le vrai modèle : trois retouches de ce prompt faites à l'intuition ont
-    chacune introduit un défaut.
+    Activée par défaut après mesure sur le vrai modèle (qwen3:14b, 4 tirages
+    par phrase, temperature 0.7, scripts/diag_retry_prompt.py, 21/09) :
+    sans la règle 26/36 (72 %), avec 36/36 (100 %). Sans elle, la tour Eiffel
+    échouait 4 fois sur 4 (`view_id="tour_eiffel"`) et la météo aussi
+    (`get_weather(city="")`). Trois retouches précédentes de ce prompt, faites
+    à l'intuition, avaient chacune introduit un défaut : on ne la retouche
+    plus sans relancer ce diagnostic.
 
     AUCUN exemple avec une valeur concrète : un exemple
     « map_control(action="fly_to", location="Reykjavik") » ajouté le 18/09 a

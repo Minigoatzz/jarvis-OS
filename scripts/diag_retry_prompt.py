@@ -18,9 +18,11 @@ Conditions de production reproduites :
 Le modèle échantillonne à 0.7 : un seul tirage ne prouve rien. Chaque phrase
 est donc envoyée N fois et on compte un TAUX de réussite.
 
-Usage, depuis C:\\jarvis-OS :
-    .\\bundle\\python\\python.exe scripts\\diag_retry_prompt.py
-    .\\bundle\\python\\python.exe scripts\\diag_retry_prompt.py --n 6
+Usage, depuis C:\\jarvis-OS — avec le Python QUE JARVIS UTILISE (voir
+Get-JarvisPython dans jarvis.ps1). `bundle\\python\\python.exe` est
+l'interpréteur nu, sans aucun paquet : ModuleNotFoundError: loguru.
+    .\\bundle\\.venv\\Scripts\\python.exe scripts\\diag_retry_prompt.py
+    .\\bundle\\.venv\\Scripts\\python.exe scripts\\diag_retry_prompt.py --n 6
 """
 
 from __future__ import annotations
@@ -157,7 +159,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--n", type=int, default=4, help="tirages par phrase (défaut 4)")
     parser.add_argument(
-        "--variants", default="actuel,lieux", help="actuel, lieux, ou les deux (défaut)"
+        "--variants", default="sans,lieux", help="sans (règle des lieux coupée), lieux (production), ou les deux"
     )
     args = parser.parse_args()
 

@@ -36,9 +36,13 @@ def _schemas() -> list[dict]:
 # ── Le prompt ───────────────────────────────────────────────────────────────
 
 
-def test_default_prompt_has_no_place_rules() -> None:
-    """Par défaut, rien ne change tant que la mesure n'a pas tranché."""
-    assert "Règles" not in build_retry_prompt(_schemas())
+def test_production_prompt_carries_the_place_rules() -> None:
+    """Mesuré le 21/09 sur qwen3:14b : 26/36 sans la règle, 36/36 avec."""
+    assert "Jamais un lieu" in build_retry_prompt(_schemas())
+
+
+def test_place_rules_can_still_be_switched_off_for_the_diagnostic() -> None:
+    assert "Règles" not in build_retry_prompt(_schemas(), place_rules=False)
 
 
 def test_place_rules_variant_adds_the_rule_and_nothing_copyable() -> None:
