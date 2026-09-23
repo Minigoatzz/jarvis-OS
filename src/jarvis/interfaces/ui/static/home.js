@@ -676,6 +676,9 @@
         });
       }
       if (data.type === "show_home")  { const a = J.views._active; if (a) J.views.deactivate(a); }
+      // Approbations (permission d'outil ou étape de mission) : sans ce relais, la
+      // demande n'était jamais affichée et expirait en refus — cf. home_overlays.js
+      if (data.type === "approval_request") window.JarvisOverlays?.handleApprovalRequest(data);
       if (data.type === "show_view")    J.views.activate(data.view_id, data.params);
       if (data.type === "hide_view")    J.views.deactivate(data.view_id);
       if (data.type === "view_command") J.views.dispatch(data.view_id, data.command, data.params);

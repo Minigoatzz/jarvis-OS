@@ -111,6 +111,7 @@ async def home_ui() -> Response:
             ("/_shared.js", "src/jarvis/interfaces/ui/static/_shared.js"),
             ("/three.min.js", "src/jarvis/interfaces/ui/static/three.min.js"),
             ("/orb.js", "src/jarvis/interfaces/ui/static/orb.js"),
+            ("/home_overlays.js", "src/jarvis/interfaces/ui/static/home_overlays.js"),
             ("/home.js", "src/jarvis/interfaces/ui/static/home.js"),
         ],
     )

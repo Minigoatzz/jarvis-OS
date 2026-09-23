@@ -20,6 +20,9 @@ from jarvis.kernel.approval import get_approval_checker, set_approval_checker  #
 from jarvis.kernel.approvals import ApprovalMode, approval_config
 from jarvis.kernel.error_collector import collector  # jrv: autofix
 
+# Délai avant refus automatique. Envoyé à la page (`timeout_s`) : une seule source.
+_APPROVAL_TIMEOUT_S = 120.0
+
 
 class ApprovalChecker:
     def __init__(self, broadcast_event: object) -> None:
@@ -58,11 +61,12 @@ class ApprovalChecker:
                 "action_id": action_id,
                 "category": category,
                 "description": description,
+                "timeout_s": _APPROVAL_TIMEOUT_S,
             }
         )
 
         try:
-            result = await asyncio.wait_for(future, timeout=120.0)
+            result = await asyncio.wait_for(future, timeout=_APPROVAL_TIMEOUT_S)
             return result
         except TimeoutError:
             collector.error("JRV-ENG-000", "JRV-ENG-000")

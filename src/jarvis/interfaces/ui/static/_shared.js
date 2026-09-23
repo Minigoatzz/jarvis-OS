@@ -708,8 +708,16 @@
     }
     // Escape
     if (e.key === "Escape") {
+      const hadOverlay = cmdkOpen || mcOpen;
       if (cmdkOpen) Jarvis.closeCmdK();
       if (mcOpen)   Jarvis.closeMissionControl();
+      // Rien d'autre n'était ouvert : la page peut s'en servir (home : quitter la
+      // vue active). Une pression d'Échap ne ferme jamais deux choses à la fois.
+      // `defaultPrevented` : un composant a déjà consommé la touche AVANT ce
+      // gestionnaire — la palette ⌘K se ferme depuis son propre champ, donc
+      // `cmdkOpen` vaut déjà false ici. Sans ce test, un seul Échap fermait la
+      // palette ET la vue (trouvé par le test navigateur du 21/09).
+      if (!hadOverlay && !e.defaultPrevented && typeof Jarvis.onEscape === "function") Jarvis.onEscape(e);
     }
   });
 

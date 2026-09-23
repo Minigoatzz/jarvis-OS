@@ -28,6 +28,10 @@ from jarvis.kernel.contracts import LLMProvider
 from jarvis.kernel.error_collector import collector  # jrv: autofix
 from jarvis.kernel.events import EventBus
 
+# Délai de réponse à une demande d'approbation d'étape. Envoyé tel quel à la page
+# (`timeout_s`) pour qu'elle affiche le vrai temps restant : une seule source.
+_APPROVAL_TIMEOUT_S = 600
+
 
 class ProjectOrchestrator:
     """Gère le cycle de vie complet des projets agents.
@@ -58,6 +62,42 @@ class ProjectOrchestrator:
         self._bus = bus
         self._workers: dict[str, WorkerAgent] = {}
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+        self._reconcile_interrupted()
+
+    # ── Missions interrompues par un redémarrage ─────────────────────────────
+
+    def _reconcile_interrupted(self) -> None:
+        """Marque en échec les missions restées « en cours » d'un process mort.
+
+        Un worker ne survit pas à l'arrêt de Jarvis, mais son état sur disque
+        restait `running` : proj_224dba est resté « en cours » du 13 au 21/09,
+        comptée comme active par mission_control et impossible à annuler (aucun
+        worker à tuer). À la construction il n'existe encore AUCUN worker dans
+        ce process — seul `app.py` appelle `bootstrap.build()` — donc toute
+        mission `planning`/`running` trouvée ici est forcément orpheline.
+
+        L'étape interrompue passe en `failed` avec la raison : `retry_project`
+        remet justement les étapes `failed` en attente, la mission reste donc
+        relançable.
+        """
+        try:
+            projects = self._store.list_projects()
+        except Exception as e:
+            collector.error("JRV-MSN-001", f"Missions interrompues : lecture impossible ({e})")
+            return
+        for project in projects:
+            if project.status not in (ProjectStatus.PLANNING, ProjectStatus.RUNNING):
+                continue
+            for step in project.steps:
+                if step.status in (StepStatus.RUNNING, StepStatus.WAITING_APPROVAL):
+                    step.status = StepStatus.FAILED
+                    step.error = "Interrompue : Jarvis s'est arrêté pendant cette étape."
+            project.status = ProjectStatus.FAILED
+            self._store.save_project(project)
+            logger.warning(
+                f"Mission {project.id} « {project.title} » interrompue par un arrêt de "
+                "Jarvis — marquée en échec (relançable)."
+            )
 
     # ── Création & lancement ──────────────────────────────────────────────────
 
@@ -247,18 +287,28 @@ class ProjectOrchestrator:
         key = f"{project_id}:{step_id}"
         self._pending_approvals[key] = future
 
+        try:
+            project = self._store.load_project(project_id)
+        except Exception as e:
+            # jrv: le titre n'est qu'un confort d'affichage — la demande part
+            # quand même, avec l'identifiant. Volontairement non mappé
+            # (scripts/error_audit/scan.py).
+            logger.debug(f"Titre de mission illisible pour {project_id} : {e}")
+            project = None
         self._broadcast(
             {
                 "type": "approval_request",
                 "project_id": project_id,
+                "project_title": project.title if project else project_id,
                 "step_id": step_id,
                 "description": description,
                 "approval_key": key,
+                "timeout_s": _APPROVAL_TIMEOUT_S,
             }
         )
 
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=600)
+            return await asyncio.wait_for(asyncio.shield(future), timeout=_APPROVAL_TIMEOUT_S)
         except TimeoutError:
             collector.error("JRV-MSN-001", "JRV-MSN-001")
             self._pending_approvals.pop(key, None)
