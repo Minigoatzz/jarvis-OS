@@ -277,6 +277,7 @@ class WorkerAgent:
             quality_checker=self._quality,
             llm=self._llm,
             cli_executor=self._cli_tool.execute,
+            workspace_path=self._project.workspace_path,
         )
 
     async def _setup_environment(self) -> None:
@@ -568,12 +569,15 @@ class WorkerAgent:
             verdict = await self._verifier.verify(self._project, step, self._files_snapshot)
             if verdict.verified:
                 step.status = StepStatus.DONE
-                step.verified = True
+                # `unverified` : l'étape passe, mais elle n'est pas cochée comme
+                # vérifiée — on ne s'attribue pas un contrôle qu'on n'a pas fait.
+                step.verified = not verdict.unverified
                 step.completed_at = datetime.now()
                 step.verification_notes = (verdict.notes or "")[:500]
                 await self._log(
-                    "info",
-                    f"✓ Vérifié [{verdict.layer}] : {step.title}",
+                    "warning" if verdict.unverified else "info",
+                    f"{'~ Non vérifié' if verdict.unverified else '✓ Vérifié'} "
+                    f"[{verdict.layer}] : {step.title}",
                     step_id=step.id,
                     data={"layer": verdict.layer, "notes": verdict.notes[:300]},
                 )

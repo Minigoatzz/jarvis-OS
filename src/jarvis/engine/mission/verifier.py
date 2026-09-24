@@ -22,6 +22,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from jarvis.engine.mission.native_checks import evaluate
 from jarvis.engine.mission.quality_checker import QualityChecker
 from jarvis.engine.mission.schemas import Project, Step
 from jarvis.kernel.contracts import LLMProvider
@@ -41,6 +42,11 @@ class VerificationResult:
     layer: str  # "structural" | "deterministic" | "semantic"
     issues: list[str] = field(default_factory=list)
     notes: str = ""
+    # True quand on n'a PAS PU vérifier (exécution refusée, commande non
+    # interprétable). L'étape continue, mais elle n'est pas déclarée vérifiée :
+    # « pas vérifiable » n'est ni un succès ni un échec, et le dire autrement
+    # serait le mensonge qu'on traque partout ailleurs.
+    unverified: bool = False
 
 
 _SEMANTIC_SYSTEM = (
@@ -63,10 +69,12 @@ class Verifier:
         quality_checker: QualityChecker,
         llm: LLMProvider,
         cli_executor: Callable[[str, int], Awaitable[dict]] | None = None,
+        workspace_path: str | None = None,
     ) -> None:
         self._quality = quality_checker
         self._llm = llm
         self._cli = cli_executor
+        self._workspace = Path(workspace_path) if workspace_path else None
 
     # ── Point d'entrée principal ──────────────────────────────────────────────
 
@@ -83,7 +91,7 @@ class Verifier:
             return structural
 
         # Couche 2
-        if step.verification_command and self._cli is not None:
+        if step.verification_command and (self._cli is not None or self._workspace is not None):
             deterministic = await self._layer_deterministic(step)
             if not deterministic.verified:
                 return deterministic
@@ -112,7 +120,32 @@ class Verifier:
     async def _layer_deterministic(self, step: Step) -> VerificationResult:
         """Exécute step.verification_command. Exit 0 = succès. Cette couche fait foi."""
         assert step.verification_command is not None
-        assert self._cli is not None
+
+        # 2a — évaluation native, sans processus. Couvre les vérifications
+        # courantes (fichier existe / non vide / contient un motif / N sections)
+        # et fonctionne sous Windows, où test/grep/awk n'existent pas.
+        if self._workspace is not None:
+            native = evaluate(step.verification_command, self._workspace)
+            if native is not None:
+                if native.passed:
+                    return VerificationResult(
+                        verified=True, layer="deterministic", notes=native.detail
+                    )
+                return VerificationResult(
+                    verified=False,
+                    layer="deterministic",
+                    issues=[native.detail],
+                    notes="Critère non atteint",
+                )
+
+        if self._cli is None:
+            return VerificationResult(
+                verified=True,
+                layer="deterministic",
+                unverified=True,
+                notes=f"Non vérifiée : aucun moyen d'évaluer « {step.verification_command} »",
+            )
+
         try:
             res = await self._cli(step.verification_command, 60)
         except Exception as exc:  # noqa: BLE001 — on capture tout exec error
@@ -126,6 +159,19 @@ class Verifier:
             )
 
         if not res.get("success", False):
+            refused = res.get("returncode") in (-1, None) and "refus" in (
+                (res.get("stderr") or "") + (res.get("stdout") or "")
+            ).lower()
+            if refused:
+                # L'exécution est coupée (ni Docker ni opt-in) : on n'a rien
+                # appris sur l'étape. La faire échouer tuait toute mission
+                # comportant une vérification — panne du 13 et du 23/09.
+                return VerificationResult(
+                    verified=True,
+                    layer="deterministic",
+                    unverified=True,
+                    notes="Non vérifiée : exécution de commandes désactivée sur cette machine",
+                )
             return VerificationResult(
                 verified=False,
                 layer="deterministic",

@@ -180,10 +180,13 @@ class ProjectOrchestrator:
         if not project:
             return None
 
-        # Remettre les étapes "running", "failed" (et "pending" déjà ok) en pending
+        # Remettre les étapes "running", "failed", "waiting_approval" en pending.
+        # WAITING_APPROVAL fait partie du lot depuis le 23/09 : proj_ca3b34 avait
+        # une étape figée là depuis dix jours (la demande n'avait jamais pu être
+        # affichée), et la relance la laissait telle quelle — donc jamais rejouée.
         reset = False
         for step in project.steps:
-            if step.status in (StepStatus.RUNNING, StepStatus.FAILED):
+            if step.status in (StepStatus.RUNNING, StepStatus.FAILED, StepStatus.WAITING_APPROVAL):
                 step.status = StepStatus.PENDING
                 step.error = None
                 step.output = None

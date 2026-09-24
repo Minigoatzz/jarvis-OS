@@ -16,7 +16,7 @@ Constat du 21/09 dans workspace/projects :
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -194,3 +194,20 @@ def test_escape_hook_respects_an_already_handled_key() -> None:
     """Trouvé par le test navigateur : Échap fermait la palette ET la vue."""
     shared = _read("_shared.js")
     assert "!hadOverlay && !e.defaultPrevented" in shared
+
+
+@pytest.mark.asyncio
+async def test_retry_also_restarts_a_step_stuck_waiting_for_approval() -> None:
+    """proj_ca3b34 : étape figée en waiting_approval depuis le 13/09 — la
+    demande n'avait jamais pu s'afficher, et `retry` ne la rejouait pas."""
+    p = _project("p", ProjectStatus.FAILED, [StepStatus.WAITING_APPROVAL, StepStatus.FAILED])
+    orch = _orch(_Store([p]))
+    orch._workers.clear()
+
+    worker = MagicMock()
+    worker.run = AsyncMock(return_value=None)
+    with patch.object(orch_mod, "WorkerAgent", return_value=worker):
+        await orch.retry_project("p")
+        await asyncio.sleep(0)  # laisse la tâche du worker se terminer proprement
+
+    assert [s.status for s in p.steps] == [StepStatus.PENDING, StepStatus.PENDING]
