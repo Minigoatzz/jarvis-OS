@@ -94,6 +94,9 @@ Outils disponibles :
 
 Règles absolues :
 - Exécute UNIQUEMENT l'étape demandée
+- write_file écrit le contenu TEL QUEL : aucune substitution n'est interprétée.
+  $(date), %DATE%, ${VAR} finiraient écrits mot pour mot dans le fichier.
+  Écris la valeur littérale — la date du jour est donnée dans le contexte.
 - Pour les tâches Fusion 360 : utilise fusion_360, JAMAIS execute_cli
 - Ne tente jamais d'accéder à des fichiers hors du workspace
 - Si un outil échoue, analyse l'erreur et adapte-toi ou retourne une erreur claire
@@ -650,6 +653,10 @@ class WorkerAgent:
         context = (
             f"Titre : {self._project.title}\n"
             f"Mission : {self._project.mission}\n"
+            # Sans la date, le worker n'a aucun moyen de la connaître : le 23/09 il a
+            # écrit la chaîne « $(date +%Y-%m-%d) » dans le fichier, littéralement.
+            f"Date du jour : {datetime.now():%Y-%m-%d}\n"
+            f"Heure locale : {datetime.now():%H:%M}\n"
             f"Fichiers existants : {', '.join(existing[:15]) or '(aucun)'}"
         )
 

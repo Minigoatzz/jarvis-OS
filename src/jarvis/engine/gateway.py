@@ -163,7 +163,18 @@ class Gateway:
                 # le même function calling natif qui ne répond pas, et se contentait
                 # donc de répéter la même phrase — l'utilisateur voyait sa demande
                 # énoncée deux fois sans que rien ne s'exécute.
-                if tool_task is None and tool_capture is not None and not tool_capture.calls:
+                # Route PROJECT : la mission lancée juste après par l'interface EST
+                # l'action. Exécuter en plus un appel d'outil écrit dans l'accusé de
+                # réception n'a aucun sens — et le 23/09 ça a produit pire : le modèle
+                # a tenté `execute_cli echo …`, l'outil a refusé, et l'utilisateur a lu
+                # « rien n'a changé » pendant qu'une mission démarrait 3 s plus tard.
+                is_project = route is RouteEnum.PROJECT
+                if (
+                    tool_task is None
+                    and tool_capture is not None
+                    and not tool_capture.calls
+                    and not is_project
+                ):
                     text_calls = agent.extract_text_tool_calls(ack_text)
                     if text_calls:
                         logger.warning(
@@ -197,6 +208,7 @@ class Gateway:
                 if (
                     tool_task is None
                     and tool_capture is not None
+                    and not is_project
                     and (route is RouteEnum.CONFIRM_FIRE or asserts_action or degenerate)
                 ):
                     forced = await agent.force_tool_call(message)
@@ -227,7 +239,7 @@ class Gateway:
                     # affirme pourtant que l'action est faite. Laisser passer,
                     # c'est mentir à l'utilisateur — le symptôme qui revient
                     # depuis le début (musique non pausée, vue non affichée).
-                    if asserts_action:
+                    if asserts_action and not is_project:
                         logger.warning(
                             "Affirmation d'action sans exécution — réponse remplacée",
                             ack=text[:120],
@@ -241,7 +253,7 @@ class Gateway:
                     # « [Cockpit] » tout seul : ce n'est pas une réponse. La
                     # rendre telle quelle donne à l'utilisateur un jeton brut
                     # sans rien lui dire de ce qui a échoué.
-                    if is_degenerate_reply(text):
+                    if is_degenerate_reply(text) and not is_project:
                         logger.warning(
                             f"Réponse dégénérée remplacée — brut : {text.strip()[:80]!r}"
                         )
