@@ -145,16 +145,54 @@ async def read_file(project_id: str, path: str, request: Request) -> dict:
         raise_api_error("JRV-PRM-001", 403, str(e), cause=e)
 
 
-@router.delete("/api/projects/{project_id}")
-async def delete_project(project_id: str, request: Request) -> dict:
+def _purge(orch: object, project: object) -> None:
+    """Arrête le worker éventuel puis efface le workspace du projet."""
     import shutil
 
+    orch.kill(project.id)  # type: ignore[attr-defined]
+    workspace = Path(project.workspace_path)  # type: ignore[attr-defined]
+    if workspace.exists():
+        shutil.rmtree(workspace)
+
+
+@router.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str, request: Request) -> dict:
     orch = _orch(request)
     project = orch.get_project(project_id)
     if not project:
         raise_api_error("JRV-API-003", 404, f"Projet non trouvé : {project_id}")
-    orch.kill(project_id)
-    workspace = Path(project.workspace_path)
-    if workspace.exists():
-        shutil.rmtree(workspace)
+    _purge(orch, project)
     return {"deleted": True}
+
+
+# Statuts qu'on accepte d'effacer en lot : uniquement des missions TERMINÉES.
+# `running`/`planning`/`paused` en sont exclus — un ménage ne doit jamais tuer
+# une mission en vol par accident.
+_PURGEABLE = {"failed", "killed", "done"}
+
+
+@router.delete("/api/projects")
+async def delete_projects_bulk(request: Request, status: str = "failed") -> dict:
+    """Efface d'un coup les missions d'un ou plusieurs statuts terminés.
+
+    `status` : liste séparée par des virgules (défaut « failed »). Le dossier
+    workspace/projects accumulait les tentatives ratées, effaçables seulement
+    une par une.
+    """
+    wanted = {s.strip().lower() for s in status.split(",") if s.strip()}
+    refused = wanted - _PURGEABLE
+    if not wanted or refused:
+        raise_api_error(
+            "JRV-API-002",
+            400,
+            f"Statuts effaçables : {', '.join(sorted(_PURGEABLE))}. Refusé : "
+            f"{', '.join(sorted(refused)) or '(aucun statut)'}",
+        )
+
+    orch = _orch(request)
+    deleted: list[str] = []
+    for project in orch.list_projects():
+        if str(project.status).lower() in wanted:
+            _purge(orch, project)
+            deleted.append(project.id)
+    return {"deleted": len(deleted), "ids": deleted}

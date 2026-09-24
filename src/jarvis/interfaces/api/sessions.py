@@ -103,15 +103,19 @@ async def rename_session(session_id: str, body: _TitleBody, request: Request) ->
     return {"id": session_id, "title": body.title.strip()}
 
 
-@router.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str, request: Request) -> dict:
-    """Supprime une session (fichier JSONL + titre associé)."""
+def _forget_session(request: Request, session_id: str) -> bool:
+    """Efface une session : fichier JSONL, titre, et entrées d'index.
+
+    Extrait de `delete_session` pour que la suppression en lot fasse
+    EXACTEMENT le même travail — un simple unlink laisserait le titre et les
+    deux index (FTS + vectoriel) parler d'une conversation disparue.
+    """
     store = getattr(request.app.state, "session_store", None)
     if store is None:
         raise_api_error("JRV-API-005", 503, "Session store unavailable.")
     path = store._find(session_id)
     if path is None:
-        raise_api_error("JRV-API-003", 404, "Session introuvable.")
+        return False
     filename = path.name
     path.unlink(missing_ok=True)
     titles = _load_titles(request)
@@ -119,7 +123,6 @@ async def delete_session(session_id: str, request: Request) -> dict:
         del titles[session_id]
         _save_titles(request, titles)
 
-    # Retire la session des indices FTS + vectoriel si disponibles
     fts_index = getattr(request.app.state, "fts_index", None)
     vector_index = getattr(request.app.state, "vector_index", None)
     if fts_index is not None or vector_index is not None:
@@ -133,8 +136,40 @@ async def delete_session(session_id: str, request: Request) -> dict:
                 await vector_index.persist()
 
         asyncio.create_task(_remove_from_indices(), name=f"indices-remove-{session_id}")
+    return True
 
+
+@router.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request) -> dict:
+    """Supprime une session (fichier JSONL + titre associé)."""
+    if not _forget_session(request, session_id):
+        raise_api_error("JRV-API-003", 404, "Session introuvable.")
     return {"deleted": session_id}
+
+
+@router.delete("/api/sessions")
+async def delete_sessions_bulk(request: Request, keep: str | None = None) -> dict:
+    """Supprime toutes les conversations, sauf `keep` (la conversation en cours).
+
+    Les effacer une par une était la seule option. `keep` évite de faire
+    disparaître le fil ouvert à l'écran pendant qu'on y parle.
+    """
+    store = getattr(request.app.state, "session_store", None)
+    if store is None:
+        raise_api_error("JRV-API-005", 503, "Session store unavailable.")
+
+    deleted: list[str] = []
+    # list_all() et pas list_recent(20) : « toutes » veut dire toutes.
+    for path in store.list_all():
+        parts = path.stem.split("_", 1)  # YYYY-MM-DD_<uuid>
+        if len(parts) != 2:
+            continue
+        session_id = parts[1]
+        if keep and session_id == keep:
+            continue
+        if _forget_session(request, session_id):
+            deleted.append(session_id)
+    return {"deleted": len(deleted), "kept": keep, "ids": deleted}
 
 
 @router.get("/api/sessions/{session_id}/messages")

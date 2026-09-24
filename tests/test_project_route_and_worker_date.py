@@ -72,6 +72,24 @@ def test_worker_is_told_that_write_file_is_literal() -> None:
     assert "$(date)" in src and "TEL QUEL" in src
 
 
+def test_worker_prompt_actually_renders() -> None:
+    """Le 23/09 j'ai écrit « ${VAR} » dans ce gabarit sans doubler les accolades.
+
+    Le prompt passe par str.format(context=…) : format() a lu {VAR} comme un
+    champ à remplacer et levé KeyError('VAR'). Toutes les étapes de mission
+    mouraient à la première seconde, avec pour seule trace l'erreur « 'VAR' ».
+    Les tests d'alors ne vérifiaient que la PRÉSENCE du texte dans le source —
+    jamais que le gabarit se rendait. Celui-ci le rend.
+    """
+    from jarvis.engine.mission.worker_agent import _WORKER_SYSTEM
+
+    rendered = _WORKER_SYSTEM.format(context="Titre : T\nMission : M")
+
+    assert "Titre : T" in rendered
+    assert "${VAR}" in rendered, "l'exemple doit survivre au rendu, littéralement"
+    assert "{context}" not in rendered
+
+
 def test_the_written_context_actually_contains_a_real_date() -> None:
     """Le format doit produire une vraie date, pas un gabarit resté tel quel."""
     rendered = f"Date du jour : {datetime.now():%Y-%m-%d}"

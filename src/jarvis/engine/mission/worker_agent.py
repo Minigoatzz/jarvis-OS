@@ -95,7 +95,7 @@ Outils disponibles :
 Règles absolues :
 - Exécute UNIQUEMENT l'étape demandée
 - write_file écrit le contenu TEL QUEL : aucune substitution n'est interprétée.
-  $(date), %DATE%, ${VAR} finiraient écrits mot pour mot dans le fichier.
+  $(date), %DATE%, ${{VAR}} finiraient écrits mot pour mot dans le fichier.
   Écris la valeur littérale — la date du jour est donnée dans le contexte.
 - Pour les tâches Fusion 360 : utilise fusion_360, JAMAIS execute_cli
 - Ne tente jamais d'accéder à des fichiers hors du workspace

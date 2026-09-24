@@ -1430,6 +1430,30 @@
     }
 
     const wrap = el("div");
+    // Tout effacer d'un coup — sauf le fil en cours (le plus récent), pour ne
+    // pas faire disparaître la conversation ouverte à l'écran.
+    if (sessions.length > 1) {
+      const bar = el("div", { class: "sessions-bulk" });
+      const purge = el("button", { class: "panel-save-btn", text: "Supprimer les " + (sessions.length - 1) + " conversations passées" });
+      purge.addEventListener("click", async () => {
+        const current = sessions[0];
+        if (!confirm("Supprimer définitivement " + (sessions.length - 1) + " conversation(s) ?\nLa plus récente est conservée.")) return;
+        purge.disabled = true;
+        const before = purge.textContent;
+        purge.textContent = "Suppression…";
+        try {
+          const res = await J.api.delete("/api/sessions?keep=" + encodeURIComponent(current.id));
+          J.notify({ kind: "success", text: res.deleted + " conversation(s) supprimée(s)" });
+          renderFils();
+        } catch (e) {
+          J.notify({ kind: "error", text: e.message });
+          purge.textContent = before;
+          purge.disabled = false;
+        }
+      });
+      bar.appendChild(purge);
+      wrap.appendChild(bar);
+    }
     wrap.appendChild(ghostSec("Sessions récentes", sessions.length + " fils", null, list));
     const page = pageWrapper("fils", "Tes conversations", '<span class="v">' + sessions.length + '</span> fils', wrap);
     root.innerHTML = ""; root.appendChild(page);

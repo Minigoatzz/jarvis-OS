@@ -670,3 +670,6 @@ body[data-mode="capacites"] { overflow-y: auto; overflow-x: hidden; }
   background: var(--bg-1);
   border: 0.5px solid var(--line-1);
 }
+
+/* Barre d'action au-dessus de la liste des conversations */
+.sessions-bulk { display: flex; justify-content: flex-end; margin-bottom: 14px; }

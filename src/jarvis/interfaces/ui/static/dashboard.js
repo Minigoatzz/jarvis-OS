@@ -81,6 +81,7 @@
         cur:    p.steps_done||null,
         tot:    p.steps_total||null,
         rawId:  p.id,
+        rawStatus: p.status,
       });
       const active = raw.filter(p => p.status !== "done" && p.status !== "failed" && p.status !== "killed").map(toRow);
       const ended  = raw.filter(p => p.status === "done" || p.status === "failed" || p.status === "killed").map(toRow);
@@ -827,7 +828,34 @@
     if (ended.length) {
       const endedList = el("div");
       ended.forEach(m => endedList.appendChild(renderMissionRow(m)));
-      wrap.appendChild(ghostSec("Terminées", ended.length + " mission" + (ended.length > 1 ? "s" : ""), null, endedList));
+
+      // Ménage en lot : les tentatives ratées s'accumulaient (quatre « Créer
+      // fichier bonjour.txt » en deux jours) et ne partaient qu'une par une.
+      // Le bouton ne vise QUE failed/killed — le serveur refuse le reste.
+      const failed = ended.filter(m => m.rawStatus === "failed" || m.rawStatus === "killed");
+      let cleanBtn = null;
+      if (failed.length) {
+        cleanBtn = el("button", {
+          class: "m-btn",
+          text: "Supprimer les " + failed.length + " échouée" + (failed.length > 1 ? "s" : ""),
+        });
+        cleanBtn.addEventListener("click", async () => {
+          if (!confirm("Supprimer définitivement " + failed.length + " mission(s) échouée(s) et leurs fichiers ?")) return;
+          cleanBtn.disabled = true;
+          const before = cleanBtn.textContent;
+          cleanBtn.textContent = "Suppression…";
+          try {
+            const res = await J.api.delete("/api/projects?status=failed,killed");
+            J.notify({ kind: "success", text: res.deleted + " mission(s) supprimée(s)" });
+            renderMissions();
+          } catch (e) {
+            J.notify({ kind: "error", text: e.message });
+            cleanBtn.textContent = before;
+            cleanBtn.disabled = false;
+          }
+        });
+      }
+      wrap.appendChild(ghostSec("Terminées", ended.length + " mission" + (ended.length > 1 ? "s" : ""), cleanBtn, endedList));
     }
 
     const page = pageWrapper(
