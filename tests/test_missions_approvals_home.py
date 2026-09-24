@@ -30,6 +30,7 @@ class _Store:
     def __init__(self, projects: list[Project]) -> None:
         self.projects = {p.id: p for p in projects}
         self.saved: list[str] = []
+        self.released: list[tuple[str, str]] = []
 
     def list_projects(self) -> list[Project]:
         return list(self.projects.values())
@@ -39,6 +40,11 @@ class _Store:
 
     def save_project(self, project: Project) -> None:
         self.saved.append(project.id)
+
+    def release_step_claim(self, project_id: str, step_id: str) -> None:
+        # Le vrai ProjectStore en a une : sans elle ici, le faux ne représentait
+        # plus le contrat (ajout du 24/09, cf. test_mission_claims_*).
+        self.released.append((project_id, step_id))
 
 
 def _orch(store, broadcast=None) -> ProjectOrchestrator:

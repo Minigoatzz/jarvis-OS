@@ -225,8 +225,18 @@
     render();
   }
 
+  function approvalKey(msg) {
+    return msg.action_id || msg.project_id + ":" + msg.step_id;
+  }
+
   function handleApprovalRequest(msg) {
     if (!msg || (!msg.action_id && !(msg.project_id && msg.step_id))) return;
+    // Deux sources possibles (le relais de la page + notre propre connexion) :
+    // une même demande ne doit apparaître qu'une fois.
+    const key = approvalKey(msg);
+    const known = (current && approvalKey(current.msg) === key)
+      || queue.some(function (item) { return approvalKey(item.msg) === key; });
+    if (known) return;
     if (!ui) ui = buildModal();
     const fallback = msg.action_id ? 120 : 600;
     const ttl = Number(msg.timeout_s) > 0 ? Number(msg.timeout_s) : fallback;
@@ -242,8 +252,35 @@
     if (!ticker) ticker = setInterval(updateCountdown, 1000);
   }
 
+  // Les demandes d'approbation arrivent par le WebSocket. Seule la page
+  // d'accueil en ouvre un (home.js) : sur le dashboard, Capacités ou Réglages,
+  // la demande n'était donc jamais affichée — et expirait en refus au bout de
+  // 2 min (permission) ou 10 min (étape de mission), sans que rien ne s'affiche
+  // nulle part. Ici : on ouvre notre propre connexion si la page n'en a pas.
+  function connectIfPageHasNoSocket() {
+    if (window.JARVIS_WS_RELAY) return; // home.js relaie déjà
+    // Page ouverte hors serveur (file://) : aucun hôte à joindre, et sans ce
+    // garde la reconnexion boucle toutes les 3 s sur une URL impossible.
+    if (!location.host || !/^https?:$/.test(location.protocol)) return;
+    let socket = null;
+    const open = function () {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(proto + "//" + location.host + "/ws");
+      socket.onmessage = function (event) {
+        let data;
+        try { data = JSON.parse(event.data); } catch (_) { return; }
+        if (data && data.type === "approval_request") handleApprovalRequest(data);
+      };
+      socket.onclose = function () { setTimeout(open, 3000); };
+      socket.onerror = function () { try { socket.close(); } catch (_) {} };
+    };
+    open();
+  }
+
   function init() {
     buildBackButton();
+    // Laisse le script de la page (home.js) se charger et poser son drapeau.
+    setTimeout(connectIfPageHasNoSocket, 0);
   }
   if (document.body) init();
   else document.addEventListener("DOMContentLoaded", init);

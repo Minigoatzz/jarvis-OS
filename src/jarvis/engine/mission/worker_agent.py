@@ -342,6 +342,29 @@ class WorkerAgent:
                     await self._log("error", f"Étape échouée : {step.title}")
                     break
             else:
+                # Une étape sautée (réclamation périmée, par exemple) ne lève pas
+                # d'échec : la boucle allait au bout et le projet se déclarait
+                # « terminé avec succès » avec une étape jamais exécutée
+                # (proj_eb0459 : 3/4, étape 2 en attente). On ne signe pas un
+                # succès sur un trou.
+                unfinished = [
+                    s
+                    for s in project.steps
+                    if s.status
+                    in (StepStatus.PENDING, StepStatus.RUNNING, StepStatus.WAITING_APPROVAL)
+                ]
+                if unfinished:
+                    project.status = ProjectStatus.FAILED
+                    project.completed_at = datetime.now()
+                    titles = ", ".join(s.title for s in unfinished[:3])
+                    await self._log(
+                        "error",
+                        f"Mission incomplète — {len(unfinished)} étape(s) jamais exécutée(s) : "
+                        f"{titles}",
+                    )
+                    # `finally` sauvegarde et pousse la mise à jour : pas de
+                    # double enregistrement ici.
+                    return
                 project.status = ProjectStatus.DONE
                 project.completed_at = datetime.now()
                 report = self._quality.generate_report()

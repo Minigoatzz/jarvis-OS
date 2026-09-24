@@ -92,6 +92,9 @@ class ProjectOrchestrator:
                 if step.status in (StepStatus.RUNNING, StepStatus.WAITING_APPROVAL):
                     step.status = StepStatus.FAILED
                     step.error = "Interrompue : Jarvis s'est arrêté pendant cette étape."
+                    # Le worker est mort avec le process : sa réclamation ne
+                    # doit pas empêcher une relance de rejouer l'étape.
+                    self._store.release_step_claim(project.id, step.id)
             project.status = ProjectStatus.FAILED
             self._store.save_project(project)
             logger.warning(
@@ -192,6 +195,12 @@ class ProjectOrchestrator:
                 step.output = None
                 step.started_at = None
                 step.completed_at = None
+                # La réclamation du worker mort survivait au Retry : le nouveau
+                # worker trouvait l'étape « déjà réclamée » et la SAUTAIT en
+                # silence (proj_eb0459 le 24/09 — mission « terminée » à 3/4,
+                # l'étape 2 restée en attente). Seule la pause budgétaire
+                # libérait les claims.
+                self._store.release_step_claim(project.id, step.id)
                 if not reset:
                     reset = True
 

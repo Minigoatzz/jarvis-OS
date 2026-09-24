@@ -82,6 +82,7 @@ async def dashboard_ui() -> Response:
             ("/_shared.css", "src/jarvis/interfaces/ui/static/_shared.css"),
             ("/dashboard.css", "src/jarvis/interfaces/ui/static/dashboard.css"),
             ("/_shared.js", "src/jarvis/interfaces/ui/static/_shared.js"),
+            ("/home_overlays.js", "src/jarvis/interfaces/ui/static/home_overlays.js"),
             ("/dashboard.js", "src/jarvis/interfaces/ui/static/dashboard.js"),
         ],
     )
@@ -95,6 +96,7 @@ async def settings_ui() -> Response:
             ("/_shared.css", "src/jarvis/interfaces/ui/static/_shared.css"),
             ("/settings.css", "src/jarvis/interfaces/ui/static/settings.css"),
             ("/_shared.js", "src/jarvis/interfaces/ui/static/_shared.js"),
+            ("/home_overlays.js", "src/jarvis/interfaces/ui/static/home_overlays.js"),
             ("/settings-charts.js", "src/jarvis/interfaces/ui/static/settings-charts.js"),
             ("/settings.js", "src/jarvis/interfaces/ui/static/settings.js"),
         ],
@@ -109,9 +111,9 @@ async def home_ui() -> Response:
             ("/_shared.css", "src/jarvis/interfaces/ui/static/_shared.css"),
             ("/home.css", "src/jarvis/interfaces/ui/static/home.css"),
             ("/_shared.js", "src/jarvis/interfaces/ui/static/_shared.js"),
+            ("/home_overlays.js", "src/jarvis/interfaces/ui/static/home_overlays.js"),
             ("/three.min.js", "src/jarvis/interfaces/ui/static/three.min.js"),
             ("/orb.js", "src/jarvis/interfaces/ui/static/orb.js"),
-            ("/home_overlays.js", "src/jarvis/interfaces/ui/static/home_overlays.js"),
             ("/home.js", "src/jarvis/interfaces/ui/static/home.js"),
         ],
     )
@@ -125,6 +127,7 @@ async def capabilities_ui() -> Response:
             ("/_shared.css", "src/jarvis/interfaces/ui/static/_shared.css"),
             ("/capabilities.css", "src/jarvis/interfaces/ui/static/capabilities.css"),
             ("/_shared.js", "src/jarvis/interfaces/ui/static/_shared.js"),
+            ("/home_overlays.js", "src/jarvis/interfaces/ui/static/home_overlays.js"),
             ("/capabilities.js", "src/jarvis/interfaces/ui/static/capabilities.js"),
         ],
     )
