@@ -166,3 +166,31 @@ def test_overlays_opens_its_own_socket_only_when_needed() -> None:
     js = (_STATIC / "home_overlays.js").read_text(encoding="utf-8")
     assert "JARVIS_WS_RELAY" in js and "new WebSocket" in js
     assert "approvalKey" in js, "dédoublonnage requis : deux sources possibles"
+
+
+# ── 4. Le dashboard suit en direct ──────────────────────────────────────────
+
+
+def test_dashboard_listens_to_project_events() -> None:
+    """Il n'écoutait rien : un instantané chargé à l'ouverture. Une mission
+    avançait sans que l'écran bouge, puis « sautait » au retour sur la page."""
+    js = (_STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "new WebSocket" in js
+    assert '"project_update"' in js and '"project_done"' in js
+    assert "scheduleLiveRefresh" in js
+
+
+def test_dashboard_refreshes_the_open_detail_panel() -> None:
+    js = (_STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "_livePanel" in js
+    assert "_livePanel = null" in js, "le panneau fermé ne doit plus être rafraîchi"
+
+
+def test_dashboard_throttles_and_shares_one_socket() -> None:
+    js = (_STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "if (_liveTimer) return" in js, "une rafale d'étapes = un seul redessin"
+    assert "JARVIS_WS_RELAY" in js, "une seule socket par page"
+    assert "JarvisOverlays?.handleApprovalRequest" in js, "les approbations passent par elle"

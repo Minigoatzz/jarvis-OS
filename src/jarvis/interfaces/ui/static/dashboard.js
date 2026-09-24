@@ -14,6 +14,7 @@
   ];
 
   let _activePage = "apercu";
+  let _livePanel = null; // { buildFn, data } du panneau de détail ouvert
   const root = document.getElementById("page-root");
 
 
@@ -609,6 +610,7 @@
   }
 
   function closePanel() {
+    _livePanel = null;
     const p = document.getElementById("dash-detail-panel");
     const o = document.getElementById("dash-detail-overlay");
     if (p) p.classList.remove("open");
@@ -616,6 +618,7 @@
   }
 
   function openPanel(buildFn, data) {
+    _livePanel = { buildFn: buildFn, data: data };
     initPanel();
     const panel = document.getElementById("dash-detail-panel");
     panel.innerHTML = "";
@@ -1095,6 +1098,63 @@
     title: p.label, glyph: "→",
     run: () => navigate(p.id),
   })));
+
+  /* ───────── Direct ─────────────────────────────────────────────────────
+     Le dashboard ne se rafraîchissait jamais : il affichait ce qu'il avait
+     chargé à l'ouverture. Une mission avançait à l'écran sans que rien ne
+     bouge, et paraissait « sauter » d'un coup en revenant sur la page.
+     Le worker diffuse pourtant `project_update` à chaque étape — personne
+     n'écoutait. Cette socket sert aussi de relais aux demandes
+     d'approbation, pour ne pas en ouvrir deux sur la même page. */
+  let _liveTimer = null;
+
+  function scheduleLiveRefresh() {
+    if (_liveTimer) return; // une rafale d'étapes = un seul redessin
+    _liveTimer = setTimeout(async () => {
+      _liveTimer = null;
+      if (_activePage === "missions") { root.innerHTML = ""; await renderMissions(); }
+
+      const panel = document.getElementById("dash-detail-panel");
+      if (_livePanel && panel && panel.classList.contains("open")) {
+        let data = _livePanel.data;
+        if (data && data.rawId) {
+          try {
+            const lists = await loadMissions();
+            const fresh = lists.active.concat(lists.ended).find(x => x.rawId === data.rawId);
+            if (fresh) data = fresh;
+          } catch (_) { /* on redessine avec ce qu'on a */ }
+        }
+        _livePanel.data = data;
+        panel.innerHTML = "";
+        _livePanel.buildFn(panel, data);
+      }
+    }, 800);
+  }
+
+  function connectLive() {
+    if (!location.host || !/^https?:$/.test(location.protocol)) return;
+    window.JARVIS_WS_RELAY = true; // home_overlays.js n'ouvrira pas sa propre socket
+    let socket = null;
+    const open = () => {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(proto + "//" + location.host + "/ws");
+      socket.onmessage = (event) => {
+        let data;
+        try { data = JSON.parse(event.data); } catch (_) { return; }
+        if (!data) return;
+        if (data.type === "approval_request") window.JarvisOverlays?.handleApprovalRequest(data);
+        if (data.type === "project_update" || data.type === "project_done"
+            || data.type === "project_created" || data.type === "project_plan_invalid") {
+          scheduleLiveRefresh();
+        }
+      };
+      socket.onclose = () => setTimeout(open, 3000);
+      socket.onerror = () => { try { socket.close(); } catch (_) {} };
+    };
+    open();
+  }
+
+  connectLive();
 
   // Kick off
   renderApercu();
