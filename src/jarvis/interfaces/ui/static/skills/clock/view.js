@@ -74,8 +74,26 @@
   }
 
   /* ─── Données : lieu local + fuseaux secondaires ────────────────────────── */
-  // Lieu local (pour l'arc solaire). Par défaut Paris ; ajustable via set_local.
-  const LOCAL = { name: 'Paris', tz: 'Europe/Paris', lat: 48.8566, lon: 2.3522 };
+  // Lieu local (nom + arc solaire). Le fuseau vient du NAVIGATEUR : il connaît
+  // le sien exactement, alors qu'une ville seule ne permet pas de le déduire.
+  // Le nom et les coordonnées viennent de HOME_CITY (/api/ui/locale) — avant,
+  // « Paris · HEURE LOCALE » s'affichait au-dessus de l'heure de Montréal.
+  const LOCAL = {
+    name: '—',
+    tz: (Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC',
+    lat: 45.5017, lon: -73.5673,
+  };
+
+  fetch('/api/ui/locale')
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (cfg) {
+      if (!cfg || !cfg.city) return;
+      LOCAL.name = cfg.city;
+      if (typeof cfg.lat === 'number' && typeof cfg.lon === 'number') {
+        LOCAL.lat = cfg.lat; LOCAL.lon = cfg.lon;
+      }
+    })
+    .catch(function () { /* repli : le fuseau du navigateur suffit à l'heure */ });
   // Fuseaux secondaires figés (DST géré par Intl).
   const ZONES = [
     { name: 'Tokyo', tz: 'Asia/Tokyo' },

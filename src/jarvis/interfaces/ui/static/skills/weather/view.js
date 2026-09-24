@@ -97,15 +97,33 @@
     return { scene: 'clouds', label: '—' };
   }
 
-  // Données de repli (Paris) — affichées instantanément, écrasées par le fetch.
+  // Données de repli — affichées instantanément, écrasées par le fetch.
+  // Le lieu est celui de HOME_CITY (/api/ui/locale) : la vue ouvrait sur Paris
+  // quel que soit le réglage. Les valeurs chiffrées restent des placeholders.
   const FALLBACK = {
-    name: 'Paris', region: 'Île-de-France', lat: 48.8566, lon: 2.3522,
+    name: 'Montréal', region: '', lat: 45.5017, lon: -73.5673,
     temp: 11, feel: 9, humidity: 88, wind: 18, visibility: 9, code: 61, isDay: 1,
     hours: [['13h', 11, 61], ['14h', 11, 61], ['15h', 10, 63], ['16h', 10, 61],
             ['17h', 9, 61], ['18h', 9, 3], ['19h', 8, 3], ['20h', 8, 3]],
   };
 
   const CITIES = ['Paris', 'Tokyo', 'New York', 'Londres', 'Sydney', 'Berlin', 'Dubaï', 'Los Angeles'];
+
+  // La ville configurée passe en tête des raccourcis et devient le repli.
+  fetch('/api/ui/locale')
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (cfg) {
+      if (!cfg || !cfg.city) return;
+      FALLBACK.name = cfg.city;
+      FALLBACK.region = '';
+      if (typeof cfg.lat === 'number' && typeof cfg.lon === 'number') {
+        FALLBACK.lat = cfg.lat; FALLBACK.lon = cfg.lon;
+      }
+      var i = CITIES.findIndex(function (c) { return c.toLowerCase() === cfg.city.toLowerCase(); });
+      if (i > 0) CITIES.splice(i, 1);
+      if (i !== 0) CITIES.unshift(cfg.city);
+    })
+    .catch(function () { /* repli : la liste d'origine reste utilisable */ });
 
   /* ─── Scènes de ciel (Canvas) ───────────────────────────────────────────── */
   const SKY = {

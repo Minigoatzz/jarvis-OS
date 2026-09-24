@@ -307,8 +307,12 @@ async def test_toutes_couches_passent_verified_true(tmp_path: Path) -> None:
 
     result = await verifier.verify(project, step, files_before)
     assert result.verified is True
-    assert result.layer == "semantic"
-    assert "ordre" in result.notes
+    # Depuis le 24/09 la couche 2 fait foi quand elle passe (sa docstring le
+    # disait déjà) : le juge LLM n'est plus consulté derrière elle. Il avait
+    # recalé une étape dont le critère était atteint (proj_b2ca0d, « Aucun
+    # fichier nouveau ou modifié » alors que le fichier contenait la date).
+    assert result.layer == "deterministic"
+    assert llm.calls == 0, "le juge ne doit pas pouvoir contredire un critère atteint"
 
 
 # ── 6bis. Régression — le prompt de couche 3 contient le CONTENU des fichiers ─

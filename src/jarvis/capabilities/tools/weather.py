@@ -9,6 +9,7 @@ from loguru import logger
 
 from jarvis.capabilities.tools.base import Tool, ToolResult
 from jarvis.kernel.error_collector import collector  # jrv: autofix
+from jarvis.kernel.settings import settings
 
 
 class WeatherTool(Tool):
@@ -28,10 +29,20 @@ class WeatherTool(Tool):
                 "description": "Nom de la ville (français ou anglais)",
             },
         },
-        "required": ["city"],
+        # `city` n'est plus requis : sans elle, on prend HOME_CITY. Avant, le
+        # modèle DEVAIT inventer une ville pour « montre moi la météo » — il a
+        # sorti « Reykjavik » (recopié d'un exemple) puis « ville » (recopié de
+        # cette description). Un défaut correct vaut mieux qu'une invention.
+        "required": [],
     }
 
-    async def execute(self, city: str, **_: object) -> ToolResult:
+    async def execute(self, city: str | None = None, **_: object) -> ToolResult:
+        city = (city or "").strip() or (settings.home_city or "").strip()
+        if not city:
+            return ToolResult(
+                content="Aucune ville : précise-la, ou renseigne HOME_CITY dans les réglages.",
+                is_error=True,
+            )
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.get(f"https://wttr.in/{city}?format=3&lang=fr")

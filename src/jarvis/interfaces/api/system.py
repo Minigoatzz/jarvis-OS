@@ -26,6 +26,54 @@ def _mem_dir(request: Request) -> Path:  # noqa: ARG001 — request ignoré, con
     return Path(settings.memory_dir)
 
 
+# ── Localisation de l'utilisateur, pour l'interface ──────────────────────────
+# Les vues (horloge, météo, barre du haut) affichaient Paris en dur : l'appli a
+# été écrite pour quelqu'un en France. Le serveur, lui, connaît HOME_CITY depuis
+# toujours — personne ne le lui demandait. Un seul endpoint, lu par toutes les
+# vues, plutôt qu'une constante recopiée dans chaque fichier.
+_COORDS_CACHE: dict[str, tuple[float, float] | None] = {}
+
+
+def _city_coords(city: str) -> tuple[float, float] | None:
+    """Coordonnées de la ville configurée, via la table locale déjà embarquée."""
+    from jarvis.capabilities.tools.show_view import CITY_COORDS
+
+    key = city.strip().lower()
+    if key in _COORDS_CACHE:
+        return _COORDS_CACHE[key]
+    coords = CITY_COORDS.get(key)
+    if coords is None:
+        # Sans accents : « montreal » doit trouver « montréal ».
+        import unicodedata
+
+        def _flat(value: str) -> str:
+            return "".join(
+                c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c)
+            )
+
+        flat = _flat(key)
+        coords = next((v for k, v in CITY_COORDS.items() if _flat(k) == flat), None)
+    _COORDS_CACHE[key] = coords
+    return coords
+
+
+@router.get("/api/ui/locale")
+async def ui_locale() -> dict:
+    """Ville et coordonnées de l'utilisateur, pour les vues.
+
+    Le fuseau n'est PAS renvoyé : le navigateur connaît le sien exactement
+    (`Intl.DateTimeFormat().resolvedOptions().timeZone`), et une ville ne suffit
+    pas à le déduire sans base de données de fuseaux.
+    """
+    city = (settings.home_city or "").strip() or "Paris"
+    coords = _city_coords(city)
+    return {
+        "city": city,
+        "lat": coords[0] if coords else None,
+        "lon": coords[1] if coords else None,
+    }
+
+
 @router.get("/api/health")
 async def jarvis_doctor() -> dict:
     """Rapport de santé complet de tous les composants Jarvis."""

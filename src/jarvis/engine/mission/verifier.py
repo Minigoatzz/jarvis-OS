@@ -84,7 +84,18 @@ class Verifier:
         step: Step,
         files_before: list[str],
     ) -> VerificationResult:
-        """Lance les trois couches en cascade. Stop à la première qui échoue."""
+        """Lance les couches en cascade. Stop à la première qui échoue.
+
+        La couche 2 FAIT FOI quand elle passe : sa docstring le disait déjà,
+        mais le code enchaînait quand même sur le juge LLM. Observé le 24/09
+        (proj_b2ca0d) : l'étape 1 avait déjà écrit la date, l'étape 2 a réécrit
+        le même contenu, la vérification `grep` du critère est passée — et le
+        LLM a recalé l'étape avec « Aucun fichier nouveau ou modifié ». Le
+        fichier contenait pourtant exactement ce qui était demandé.
+
+        La couche 1 (fichier vide, Python invalide, HTML cassé) garde la
+        priorité : un critère atteint avec un artefact malformé reste un échec.
+        """
         # Couche 1
         structural = self._layer_structural(files_before)
         if not structural.verified:
@@ -94,6 +105,10 @@ class Verifier:
         if step.verification_command and (self._cli is not None or self._workspace is not None):
             deterministic = await self._layer_deterministic(step)
             if not deterministic.verified:
+                return deterministic
+            if not deterministic.unverified:
+                # Critère objectivement atteint : le juge LLM n'a rien à ajouter,
+                # et il ne doit surtout pas pouvoir le contredire.
                 return deterministic
 
         # Couche 3

@@ -543,8 +543,16 @@
       el("span", { class: "sep" }),
       el("span", { text: tStr }),
       el("span", { class: "sep" }),
-      el("span", { text: "Paris" }),
+      // Ville configurée (HOME_CITY), pas « Paris » en dur.
+      el("span", { id: "j-topbar-city", text: "—" }),
     ]));
+    fetch("/api/ui/locale")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) {
+        const node = document.getElementById("j-topbar-city");
+        if (node && cfg && cfg.city) node.textContent = cfg.city;
+      })
+      .catch(function () { /* la barre reste lisible sans la ville */ });
 
     root.appendChild(el("div", { class: "topbar-r" }, [
       el("button", { class: "tb-btn", onclick: () => Jarvis.openCmdK() }, [
