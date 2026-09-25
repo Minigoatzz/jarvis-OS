@@ -237,13 +237,20 @@ class WorkerAgent:
         self._llm = llm
         self._budget = budget_guard
         self._worker_id = uuid.uuid4().hex[:8]  # identifiant unique pour les claims
-        self._file_tool = SandboxedFileTool(project.workspace_path)
+        self._file_tool = SandboxedFileTool(
+            project.workspace_path,
+            allow_network=bool(getattr(project, "requires_network", False)),
+        )
         self._cli_tool = WorkerCLITool(project.workspace_path)
         self._docker = None
         self._killed = False
         self._quality = QualityChecker(project.workspace_path)
         self._pending_issues: list[str] = []
         self._files_snapshot: list[str] = []
+        # Refus de POLITIQUE rencontrés pendant l'étape courante (backend absent,
+        # commande hors whitelist, garde de script). Ils portent la vraie cause
+        # d'un échec ; sans eux l'utilisateur ne lit que « trop d'étapes ».
+        self._blockers: list[str] = []
         # PHASE 1 — governance et verifier (injection ou construction tardive).
         self._governance = governance
         self._verifier = verifier
@@ -539,6 +546,7 @@ class WorkerAgent:
             "fusion" in self._project.mission.lower() or "fusion" in self._project.title.lower()
         )
         prev_issues: list[str] = []
+        self._blockers = []
 
         for attempt in range(_VERIFICATION_MAX_RETRIES):
             self._files_snapshot = self._file_tool.list_files()
@@ -628,6 +636,10 @@ class WorkerAgent:
         # Tous les essais épuisés sans vérification — step FAILED, mission FAILED.
         step.status = StepStatus.FAILED
         step.error = f"Vérification non concluante après {_VERIFICATION_MAX_RETRIES} essais"
+        if self._blockers:
+            # La vraie cause, pas le symptôme. Sans ça l'écran affiche
+            # « trop d'étapes » et le blocage réel reste invisible.
+            step.error += " — cause : " + " | ".join(self._blockers)
         await self._log(
             "error",
             f"Step FAILED — vérification non concluante : {step.title}",
@@ -767,6 +779,17 @@ class WorkerAgent:
                 res = await self._cli_tool.execute(cmd, timeout=timeout)
                 if res["success"]:
                     return res["stdout"] or "(commande exécutée, pas de sortie)"
+                if res.get("blocked"):
+                    # Refus de politique : aucun retry ne peut le lever. On le
+                    # mémorise pour le rapport ET on le dit au modèle, sinon il
+                    # relance la même commande jusqu'à épuiser sa boucle d'outils.
+                    self._note_blocker(res["stderr"])
+                    return (
+                        f"REFUS DÉFINITIF : {res['stderr']} "
+                        f"Inutile de réessayer cette commande — elle restera refusée "
+                        f"tant que la configuration n'aura pas changé. Termine l'étape "
+                        f"en expliquant ce blocage."
+                    )
                 return f"ERREUR (rc={res['returncode']}) : {res['stderr']}"
 
             if name == "fusion_360":
@@ -784,13 +807,20 @@ class WorkerAgent:
 
         except ValueError as e:
             collector.error("JRV-MSN-001", "JRV-MSN-001", cause=e)
-            # Sandbox violation
+            # Sandbox violation ou garde de contenu : politique, pas incident.
             await self._log("error", f"SANDBOX: {e}")
+            self._note_blocker(str(e))
             return f"ACCÈS REFUSÉ : {e}"
         except Exception as e:
             collector.error("JRV-MSN-001", "JRV-MSN-001", cause=e)
             await self._log("error", f"Tool error {name}: {e}")
             return f"Erreur : {e}"
+
+    def _note_blocker(self, message: str) -> None:
+        """Mémorise un refus de politique, sans doublon, pour le rapport d'échec."""
+        cleaned = " ".join(message.split())[:300]
+        if cleaned and cleaned not in self._blockers:
+            self._blockers.append(cleaned)
 
     async def _gate_tool(self, name: str, inputs: dict) -> str | None:
         """Gate au niveau outil (Q3=c). Renvoie un message de refus, ou None si autorisé."""

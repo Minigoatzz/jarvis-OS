@@ -7,6 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
+import shlex
+import sys
 from pathlib import Path
 
 from loguru import logger
@@ -14,6 +18,23 @@ from loguru import logger
 from jarvis.engine.mission.backends.base import BackendResult, ExecutionBackend
 from jarvis.kernel.error_collector import collector  # jrv: autofix
 from jarvis.kernel.settings import settings
+
+# Sur Windows, « python3 » n'existe pas : il tombe sur le stub du Microsoft
+# Store, qui ouvre le Store et sort en code non-zéro. « python » nu peut tomber
+# sur le même stub. Or tout le vocabulaire du système (whitelist, prompts,
+# exemples) dit « python3 ». On réécrit donc le token d'interpréteur vers
+# l'interpréteur réellement en train de faire tourner Jarvis, qui existe par
+# construction. Windows uniquement : ailleurs « python3 » est correct, et sous
+# Docker c'est le DockerBackend qui exécute — il ne passe jamais par ici.
+_PY_TOKEN_RE = re.compile(r"(?:(?<=^)|(?<=&&)|(?<=;)|(?<=\|))(\s*)(python3?)(?=\s|$)")
+
+
+def _resolve_interpreter(command: str) -> str:
+    """Remplace les tokens python/python3 par sys.executable sur Windows."""
+    if os.name != "nt":
+        return command
+    exe = shlex.quote(sys.executable) if " " in sys.executable else sys.executable
+    return _PY_TOKEN_RE.sub(lambda m: f"{m.group(1)}{exe}", command)
 
 
 class LocalBackend(ExecutionBackend):
@@ -43,17 +64,19 @@ class LocalBackend(ExecutionBackend):
                     "ou passez ALLOW_UNSANDBOXED_EXEC=true (déconseillé)."
                 ),
                 returncode=-1,
+                blocked=True,
             )
 
         try:
+            resolved = _resolve_interpreter(command)
             proc = await asyncio.create_subprocess_shell(
-                command,
+                resolved,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._workspace,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            logger.debug("LocalBackend exec", cmd=command[:60], rc=proc.returncode)
+            logger.debug("LocalBackend exec", cmd=resolved[:80], rc=proc.returncode)
             return BackendResult(
                 success=proc.returncode == 0,
                 stdout=stdout.decode("utf-8", errors="replace")[:8000],

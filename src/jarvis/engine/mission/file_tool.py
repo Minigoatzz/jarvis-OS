@@ -10,15 +10,22 @@ from pathlib import Path
 
 from loguru import logger
 
+from jarvis.engine.mission import script_guard
+
 
 class SandboxedFileTool:
-    def __init__(self, workspace_path: str) -> None:
+    def __init__(self, workspace_path: str, *, allow_network: bool = False) -> None:
         self._workspace = Path(workspace_path).resolve()
+        # Vient de project.requires_network : conditionne le garde réseau de
+        # script_guard, qui refuse un import requests dans un projet offline.
+        self._allow_network = allow_network
 
     def _safe_path(self, relative_path: str) -> Path:
         """Vérifie que le chemin résolu reste dans le workspace. Lève ValueError sinon."""
         target = (self._workspace / relative_path).resolve()
-        if not str(target).startswith(str(self._workspace)):
+        # is_relative_to, pas startswith : un workspace « /ws » laissait passer
+        # « /ws-evil », qui partage le préfixe sans être dedans.
+        if not target.is_relative_to(self._workspace):
             logger.error("SANDBOX VIOLATION", path=relative_path, target=str(target))
             raise ValueError(f"ACCÈS REFUSÉ : '{relative_path}' sort du workspace autorisé.")
         return target
@@ -31,6 +38,13 @@ class SandboxedFileTool:
 
     def write_file(self, path: str, content: str) -> str:
         target = self._safe_path(path)
+        # Le garde CLI n'inspecte que la ligne de commande ; « python script.py »
+        # est whitelisté, donc le CONTENU du script est la seule occasion de
+        # refuser un rmtree ou un subprocess halluciné. C'est ici ou nulle part.
+        verdict = script_guard.inspect(path, content, allow_network=self._allow_network)
+        if not verdict.allowed:
+            logger.error("SCRIPT GUARD", path=path, reason=verdict.reason[:120])
+            raise ValueError(verdict.reason)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         logger.info("Sandbox write", path=path, chars=len(content))

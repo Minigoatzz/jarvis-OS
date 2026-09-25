@@ -117,6 +117,7 @@ class WorkerCLITool:
                 "stdout": "",
                 "stderr": f"Commande bloquée par la politique de sécurité : {stripped[:60]}",
                 "returncode": -1,
+                "blocked": True,
             }
 
         if not any(stripped.startswith(w) for w in WORKER_CLI_WHITELIST):
@@ -129,6 +130,7 @@ class WorkerCLITool:
                     f"{', '.join(WORKER_CLI_WHITELIST[:8])}..."
                 ),
                 "returncode": -1,
+                "blocked": True,
             }
 
         # python/python3 : seule l'exécution de fichiers .py est autorisée
@@ -142,6 +144,7 @@ class WorkerCLITool:
                     "Utilisez un fichier .py : python3 script.py"
                 ),
                 "returncode": -1,
+                "blocked": True,
             }
 
         return None
@@ -177,6 +180,7 @@ class WorkerCLITool:
                     "(ALLOW_UNSANDBOXED_EXEC=true, déconseillé)."
                 ),
                 "returncode": -1,
+                "blocked": True,
             }
 
         logger.debug("WorkerCLI → backend", backend=backend.name, cmd=command[:60])

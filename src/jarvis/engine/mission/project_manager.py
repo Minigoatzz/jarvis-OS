@@ -28,9 +28,23 @@ Règles générales :
 - Maximum 12 étapes (RAPPORT.md inclus)
 - Sois réaliste sur ce qui est faisable dans un répertoire isolé
 
+Boîte à outils RÉELLE de l'agent — ne planifie RIEN qui en sorte :
+- read_file / write_file / list_files / create_directory, tous relatifs au workspace
+- execute_cli, limité à une whitelist : python, node, npm, git (sans push ni commit),
+  pip install, mkdir, cp, mv, ls, cat, head, tail, grep, find, wc, echo, sed, awk,
+  test, diff, sort, uniq, curl -s, wget, ffmpeg, zip, unzip, pandoc
+- AUCUN accès web interactif, AUCUN navigateur, AUCUN envoi d'email, AUCUN accès
+  aux fichiers de l'utilisateur hors du workspace
+- Les scripts générés ne peuvent pas utiliser subprocess, os.system ni shutil.rmtree :
+  pour lancer une commande, c'est execute_cli, pas le script
+
 Règles qualité obligatoires :
-- Insère une étape de vérification/test toutes les 3-4 étapes de production (exécuter le code,
-  vérifier les liens HTML, tester une fonctionnalité clé)
+- Insère une étape de vérification/test toutes les 3-4 étapes DE PRODUCTION.
+  Si le projet tient en 2 étapes, il a 1 étape de test — pas 3. Ne gonfle jamais
+  un plan pour atteindre un quota : un plan de 3 étapes qui aboutit vaut mieux
+  qu'un plan de 7 qui meurt à la deuxième.
+- Une seule étape « exécuter et vérifier la sortie » suffit pour un script :
+  ne sépare pas « tester », « exécuter », « re-tester » en trois étapes.
 - Ajoute une étape de test final avant la livraison
 
 Types de projet :
@@ -69,7 +83,12 @@ Règles success_criterion (obligatoire, non vide) :
 
 Règles verification_command (facultatif, exit 0 = succès) :
 - Si l'étape produit du code/fichiers testables, fournis une commande shell qui
-  exit 0 ssi le critère est atteint. Ex : "test -s index.html", "python3 -c 'import script'"
+  exit 0 ssi le critère est atteint. Ex : "test -s index.html",
+  "test -s script.py", "grep -E 'def main' script.py",
+  "test -f out.txt && grep -c '^' out.txt"
+- INTERDIT : python3 -c "..." et toute commande contenant des guillemets autour
+  de code Python — la couche de sécurité du worker les refuse systématiquement,
+  la vérification échouerait quoi qu'il arrive.
 - Vide ou null si pas de commande déterministe
 
 Règles access_level (entier 0-5, par défaut 1) :

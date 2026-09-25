@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 
 class BackendResult(TypedDict):
@@ -17,6 +17,11 @@ class BackendResult(TypedDict):
     stdout: str
     stderr: str
     returncode: int
+    # True quand l'échec vient d'une POLITIQUE (backend absent, commande hors
+    # whitelist, opt-in manquant) et non de la commande elle-même. Un retry ne
+    # peut rien y changer : le worker doit le remonter tel quel au lieu de
+    # boucler jusqu'à « trop d'étapes », ce qui cache la vraie cause.
+    blocked: NotRequired[bool]
 
 
 class ExecutionBackend(ABC):
