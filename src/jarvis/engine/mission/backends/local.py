@@ -6,10 +6,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +18,7 @@ from loguru import logger
 from jarvis.engine.mission.backends.base import BackendResult, ExecutionBackend
 from jarvis.kernel.error_collector import collector  # jrv: autofix
 from jarvis.kernel.settings import settings
+from jarvis.kernel.subprocess_compat import describe_exception, run_shell
 
 # Sur Windows, « python3 » n'existe pas : il tombe sur le stub du Microsoft
 # Store, qui ouvre le Store et sort en code non-zéro. « python » nu peut tomber
@@ -67,23 +68,20 @@ class LocalBackend(ExecutionBackend):
                 blocked=True,
             )
 
+        resolved = _resolve_interpreter(command)
         try:
-            resolved = _resolve_interpreter(command)
-            proc = await asyncio.create_subprocess_shell(
-                resolved,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self._workspace,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            logger.debug("LocalBackend exec", cmd=resolved[:80], rc=proc.returncode)
+            # run_shell passe par un thread : l'API sous-processus de la boucle
+            # asyncio n'existe pas sur la SelectorEventLoop qu'uvicorn impose
+            # sur Windows quand reload=True. Voir kernel/subprocess_compat.
+            result = await run_shell(resolved, cwd=self._workspace, timeout=timeout)
+            logger.debug("LocalBackend exec", cmd=resolved[:80], rc=result.returncode)
             return BackendResult(
-                success=proc.returncode == 0,
-                stdout=stdout.decode("utf-8", errors="replace")[:8000],
-                stderr=stderr.decode("utf-8", errors="replace")[:2000],
-                returncode=proc.returncode,
+                success=result.success,
+                stdout=result.stdout[:8000],
+                stderr=result.stderr[:2000],
+                returncode=result.returncode,
             )
-        except TimeoutError:
+        except subprocess.TimeoutExpired:
             collector.error("JRV-MSN-001", "JRV-MSN-001")
             return BackendResult(
                 success=False,
@@ -96,6 +94,8 @@ class LocalBackend(ExecutionBackend):
             return BackendResult(
                 success=False,
                 stdout="",
-                stderr=str(exc),
+                # describe_exception, pas str() : str(NotImplementedError()) est
+                # vide, et c'est ce qui a rendu cette panne invisible.
+                stderr=describe_exception(exc),
                 returncode=-1,
             )

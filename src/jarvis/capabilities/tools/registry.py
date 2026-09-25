@@ -8,6 +8,7 @@ from loguru import logger
 
 from jarvis.capabilities.tools.base import Tool, ToolResult
 from jarvis.kernel.error_collector import collector
+from jarvis.kernel.subprocess_compat import describe_exception
 
 _TOOL_CODES: dict[str, str] = {
     "spotify": "JRV-TOL-002",
@@ -107,9 +108,13 @@ class ToolRegistry:
             return result
         except Exception as e:
             collector.error(code, f"Tool {name} failed", cause=e)
-            logger.error("Tool execution error", name=name, error=str(e))
+            # describe_exception et non str() : une exception sans message
+            # (NotImplementedError, KeyError vide…) affichait « Erreur outil X: »
+            # suivi de rien, ce qui a masqué une panne complète de l'exécution.
+            detail = describe_exception(e)
+            logger.error("Tool execution error", name=name, error=detail)
             return ToolResult(
-                content=_prefix_error_content(code, f"Erreur outil {name}: {e}"),
+                content=_prefix_error_content(code, f"Erreur outil {name}: {detail}"),
                 is_error=True,
             )
 

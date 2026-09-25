@@ -12,6 +12,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from jarvis.capabilities.tools.cli import ExecuteCLITool
+from jarvis.kernel.subprocess_compat import RunResult
+
+# Ces tests espionnaient l'API sous-processus d'asyncio. L'outil passe
+# desormais par kernel.subprocess_compat.run_exec, parce que la boucle
+# choisie par uvicorn sur Windows ne sait pas lancer de sous-processus.
+# Seul le POINT D'OBSERVATION change ici : les garanties verifiees
+# (cwd confine, env restreint, binaire hors whitelist jamais lance)
+# sont identiques, et leurs assertions n'ont pas ete touchees.
+_SEAM = "jarvis.capabilities.tools.cli.run_exec"
+
+
+def _resultat(stdout: bytes = b"ok") -> RunResult:
+    return RunResult(returncode=0, stdout=stdout.decode(), stderr="")
 
 
 @pytest.fixture()
@@ -109,11 +122,7 @@ async def test_osascript_confirmed_executes(
     mock_settings.allow_unsandboxed_exec = False
     monkeypatch.setattr("jarvis.capabilities.tools.cli.settings", mock_settings)
 
-    mock_proc = MagicMock()
-    mock_proc.communicate = AsyncMock(return_value=(b"result", b""))
-    mock_proc.returncode = 0
-
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)) as mock_exec:
+    with patch(_SEAM, AsyncMock(return_value=_resultat(b"result"))) as mock_exec:
         result = await tool.execute(command="osascript -e 'beep'", confirmed=True)
 
     assert mock_exec.called
@@ -212,7 +221,7 @@ async def test_unparsable_unclosed_double_quote(tool: ExecuteCLITool) -> None:
 
 async def test_unparsable_is_not_executed(tool: ExecuteCLITool) -> None:
     """Vérifie qu'aucun subprocess n'est lancé pour une commande non parsable."""
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
+    with patch(_SEAM) as mock_exec:
         await tool.execute(command="ffmpeg -i 'bad")
     mock_exec.assert_not_called()
 
@@ -227,18 +236,15 @@ async def test_sandbox_active_by_default(
     """cwd confiné + env restreint actifs par défaut (allow_unsandboxed_exec=False)."""
     captured: dict = {}
 
-    async def mock_exec(*args: object, **kwargs: object) -> MagicMock:
+    async def mock_exec(*args: object, **kwargs: object) -> RunResult:
         captured.update(kwargs)
-        proc = MagicMock()
-        proc.communicate = AsyncMock(return_value=(b"done", b""))
-        proc.returncode = 0
-        return proc
+        return _resultat(b"done")
 
     mock_settings = MagicMock()
     mock_settings.allow_unsandboxed_exec = False
     monkeypatch.setattr("jarvis.capabilities.tools.cli.settings", mock_settings)
 
-    with patch("asyncio.create_subprocess_exec", side_effect=mock_exec):
+    with patch(_SEAM, side_effect=mock_exec):
         await tool.execute(command="ffmpeg -version")
 
     assert "cwd" in captured, "cwd doit être confiné en sandbox"
@@ -255,18 +261,15 @@ async def test_sandbox_disabled_with_opt_in(
     """allow_unsandboxed_exec=True désactive le sandbox (pas de cwd/env injectés)."""
     captured: dict = {}
 
-    async def mock_exec(*args: object, **kwargs: object) -> MagicMock:
+    async def mock_exec(*args: object, **kwargs: object) -> RunResult:
         captured.update(kwargs)
-        proc = MagicMock()
-        proc.communicate = AsyncMock(return_value=(b"done", b""))
-        proc.returncode = 0
-        return proc
+        return _resultat(b"done")
 
     mock_settings = MagicMock()
     mock_settings.allow_unsandboxed_exec = True
     monkeypatch.setattr("jarvis.capabilities.tools.cli.settings", mock_settings)
 
-    with patch("asyncio.create_subprocess_exec", side_effect=mock_exec):
+    with patch(_SEAM, side_effect=mock_exec):
         await tool.execute(command="ffmpeg -version")
 
     assert "cwd" not in captured, "sans sandbox, cwd ne doit pas être forcé"
@@ -287,11 +290,7 @@ async def _run_legit(
     mock_settings.allow_unsandboxed_exec = False
     monkeypatch.setattr("jarvis.capabilities.tools.cli.settings", mock_settings)
 
-    mock_proc = MagicMock()
-    mock_proc.communicate = AsyncMock(return_value=(stdout, b""))
-    mock_proc.returncode = 0
-
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)):
+    with patch(_SEAM, AsyncMock(return_value=_resultat(stdout))):
         result = await tool.execute(command=command)
 
     assert not result.is_error, f"commande légitime bloquée : {command!r} → {result.content}"

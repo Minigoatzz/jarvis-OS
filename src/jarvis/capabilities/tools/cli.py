@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
-import asyncio
+import os
 import re
 import shlex
+import subprocess
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +18,7 @@ from loguru import logger
 from jarvis.capabilities.tools.base import Tool, ToolResult
 from jarvis.kernel.error_collector import collector  # jrv: autofix
 from jarvis.kernel.settings import settings
+from jarvis.kernel.subprocess_compat import describe_exception, run_exec
 
 # ── Whitelist binaires autorisés pour execute_cli ────────────────────────────
 CLI_WHITELIST: frozenset[str] = frozenset(
@@ -101,6 +103,29 @@ _EXEC_BLOCKED_RE = re.compile(
 )
 
 _TIMEOUT = 30.0
+
+
+def _sandbox_env(tmp_dir: str) -> dict[str, str]:
+    """Environnement restreint du bac a sable, adapte a la plateforme.
+
+    La version POSIX impose un PATH minimal. Sur Windows le meme PATH ne
+    resout AUCUN binaire (pas de /usr/bin, et sans PATHEXT ni SYSTEMROOT
+    CreateProcess echoue) : la commande ne demarrait simplement jamais. On y
+    conserve donc le PATH systeme et on isole ce qui peut l'etre — le
+    repertoire de travail et les dossiers temporaires. C'est une isolation
+    plus faible que sur POSIX, et c'est dit franchement plutot que masque.
+    """
+    if os.name == "nt":
+        env = dict(os.environ)
+        env.update({"HOME": tmp_dir, "USERPROFILE": tmp_dir, "TEMP": tmp_dir, "TMP": tmp_dir})
+        return env
+    return {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": tmp_dir,
+        "TMPDIR": tmp_dir,
+        "LANG": "fr_FR.UTF-8",
+        "LC_ALL": "fr_FR.UTF-8",
+    }
 _APPROVAL_TTL = timedelta(minutes=5)
 
 # ── Blocklist inconditionnelle ────────────────────────────────────────────────
@@ -289,44 +314,30 @@ class CLIRunnerTool(Tool):
 
     async def _run(self, cmd: list[str], alias: str, *, sandboxed: bool) -> ToolResult:
         """Exécute le subprocess, en sandbox si demandé."""
-        extra_kwargs: dict = {
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.STDOUT,
-        }
+        extra_kwargs: dict = {}
 
         tmp_dir: str | None = None
         if sandboxed:
             tmp_dir = tempfile.mkdtemp(prefix="jarvis_sandbox_")
             extra_kwargs["cwd"] = tmp_dir
-            extra_kwargs["env"] = {
-                "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                "HOME": tmp_dir,
-                "TMPDIR": tmp_dir,
-                "LANG": "fr_FR.UTF-8",
-                "LC_ALL": "fr_FR.UTF-8",
-            }
+            extra_kwargs["env"] = _sandbox_env(tmp_dir)
             logger.info("CLIRunner sandboxed", alias=alias, cwd=tmp_dir)
         else:
             logger.info("CLIRunner executing", alias=alias, cmd=cmd)
 
         try:
-            proc = await asyncio.create_subprocess_exec(*cmd, **extra_kwargs)
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT)
-            output = stdout.decode(errors="replace").strip() or "Terminé (pas de sortie)."
-            success = proc.returncode == 0
-            logger.info("CLIRunner done", alias=alias, returncode=proc.returncode)
-            return ToolResult(content=output, is_error=not success)
-        except TimeoutError:
+            res = await run_exec(list(cmd), timeout=int(_TIMEOUT), **extra_kwargs)
+            output = (res.stdout + res.stderr).strip() or "Terminé (pas de sortie)."
+            logger.info("CLIRunner done", alias=alias, returncode=res.returncode)
+            return ToolResult(content=output, is_error=not res.success)
+        except subprocess.TimeoutExpired:
             collector.error("JRV-TOL-001", "JRV-TOL-001")
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                collector.error("JRV-TOL-001", "JRV-TOL-001")
-                pass
             return ToolResult(content=f"Timeout après {_TIMEOUT}s.", is_error=True)
-        except OSError as e:
+        except Exception as e:
             collector.error("JRV-TOL-001", "JRV-TOL-001", cause=e)
-            return ToolResult(content=f"Erreur d'exécution : {e}", is_error=True)
+            return ToolResult(
+                content=f"Erreur d'exécution : {describe_exception(e)}", is_error=True
+            )
 
 
 class ExecuteCLITool(Tool):
@@ -417,43 +428,29 @@ class ExecuteCLITool(Tool):
         """Exécute le subprocess, sandboxé par défaut."""
 
         sandboxed = not getattr(settings, "allow_unsandboxed_exec", False)
-        extra_kwargs: dict = {
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.STDOUT,
-        }
+        extra_kwargs: dict = {}
 
         if sandboxed:
             tmp_dir = tempfile.mkdtemp(prefix="jarvis_exec_")
             extra_kwargs["cwd"] = tmp_dir
-            extra_kwargs["env"] = {
-                "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                "HOME": tmp_dir,
-                "TMPDIR": tmp_dir,
-                "LANG": "fr_FR.UTF-8",
-                "LC_ALL": "fr_FR.UTF-8",
-            }
+            extra_kwargs["env"] = _sandbox_env(tmp_dir)
             logger.info(f"ExecuteCLI sandboxed cwd={tmp_dir}: {cmd_str[:60]}")
         else:
             logger.info(f"ExecuteCLI unsandboxed (allow_unsandboxed_exec=true): {cmd_str[:60]}")
 
         try:
-            proc = await asyncio.create_subprocess_exec(*parts, **extra_kwargs)
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300.0)
-            output = stdout.decode(errors="replace").strip() or "Terminé (pas de sortie)."
-            success = proc.returncode == 0
-            logger.info(f"ExecuteCLI done: rc={proc.returncode}")
-            return ToolResult(content=output, is_error=not success)
-        except TimeoutError:
+            res = await run_exec(list(parts), timeout=300, **extra_kwargs)
+            output = (res.stdout + res.stderr).strip() or "Terminé (pas de sortie)."
+            logger.info(f"ExecuteCLI done: rc={res.returncode}")
+            return ToolResult(content=output, is_error=not res.success)
+        except subprocess.TimeoutExpired:
             collector.error("JRV-TOL-001", "JRV-TOL-001")
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                collector.error("JRV-TOL-001", "JRV-TOL-001")
-                pass
             return ToolResult(content="Timeout après 300s.", is_error=True)
-        except OSError as e:
+        except Exception as e:
             collector.error("JRV-TOL-001", "JRV-TOL-001", cause=e)
-            return ToolResult(content=f"Erreur d'exécution : {e}", is_error=True)
+            return ToolResult(
+                content=f"Erreur d'exécution : {describe_exception(e)}", is_error=True
+            )
 
     async def execute(
         self,
