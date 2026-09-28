@@ -12,6 +12,17 @@ from loguru import logger
 
 from jarvis.engine.mission import script_guard
 
+# Extensions qui désignent sans ambiguïté un FICHIER. Un dossier ainsi nommé est
+# une erreur du modèle, pas une intention : cf. create_directory().
+_FILE_SUFFIXES = frozenset(
+    {
+        ".md", ".txt", ".py", ".js", ".ts", ".json", ".csv", ".html", ".htm", ".css",
+        ".yaml", ".yml", ".xml", ".toml", ".ini", ".cfg", ".log", ".sql", ".sh",
+        ".ps1", ".bat", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+        ".docx", ".xlsx", ".pptx", ".zip",
+    }
+)
+
 
 def _is_internal(rel: Path) -> bool:
     """Vrai pour les fichiers internes de Jarvis (.jarvis/, .jarvis_rpc/…).
@@ -49,6 +60,19 @@ class SandboxedFileTool:
 
     def write_file(self, path: str, content: str) -> str:
         target = self._safe_path(path)
+        if target.is_dir():
+            # Sous Windows, écrire sur un dossier lève « [Errno 13] Permission
+            # denied » — message trompeur : le 28/09, un dossier RAPPORT.md créé
+            # par erreur a fait échouer six écritures de suite, et le modèle n'a
+            # jamais compris pourquoi. Vide, c'est un artefact sans contenu : on
+            # le remplace. Non vide, on le dit en clair plutôt que d'effacer.
+            if any(target.iterdir()):
+                raise ValueError(
+                    f"« {path} » est un DOSSIER non vide, pas un fichier : impossible "
+                    f"d'y écrire. Choisis un autre nom de fichier."
+                )
+            target.rmdir()
+            logger.warning("Dossier vide remplacé par un fichier", path=path)
         # Le garde CLI n'inspecte que la ligne de commande ; « python script.py »
         # est whitelisté, donc le CONTENU du script est la seule occasion de
         # refuser un rmtree ou un subprocess halluciné. C'est ici ou nulle part.
@@ -91,5 +115,13 @@ class SandboxedFileTool:
 
     def create_directory(self, path: str) -> str:
         target = self._safe_path(path)
+        # Un « dossier » nommé RAPPORT.md bloque ensuite toute écriture du
+        # fichier du même nom. write_file crée déjà les dossiers parents : ce
+        # dossier-là n'a aucun usage légitime.
+        if target.suffix.lower() in _FILE_SUFFIXES:
+            raise ValueError(
+                f"« {path} » est un nom de FICHIER, pas de dossier. Utilise "
+                f"write_file pour le créer : il crée lui-même les dossiers parents."
+            )
         target.mkdir(parents=True, exist_ok=True)
         return f"Répertoire créé : {path}"

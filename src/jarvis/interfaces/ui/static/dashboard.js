@@ -780,7 +780,7 @@
       fileSec.appendChild(el("div", { class: "panel-section-title", text: "Fichiers produits" }));
       files.forEach(f => {
         const row = el("div", { class: "mp-file-row" });
-        const icon = el("span", { class: "mp-file-icon", text: f.endsWith(".md") ? "📄" : f.endsWith(".json") ? "📋" : f.endsWith(".py") || f.endsWith(".js") ? "📝" : "📁" });
+        const icon = el("span", { class: "mp-file-icon", text: f.endsWith(".md") ? "📄" : f.endsWith(".json") ? "📋" : f.endsWith(".py") || f.endsWith(".js") ? "📝" : "📄" });
         const name = el("button", { class: "mp-file-name", text: f });
         name.addEventListener("click", () => openFileViewer(m.rawId, f));
         row.appendChild(icon); row.appendChild(name);
