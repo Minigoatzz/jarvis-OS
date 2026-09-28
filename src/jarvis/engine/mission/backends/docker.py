@@ -20,8 +20,19 @@ class DockerBackend(ExecutionBackend):
     --rm, cap-drop ALL, no-new-privileges, mémoire et CPU limités.
     """
 
-    def __init__(self, executor: object) -> None:
+    # Point de montage du workspace dans le container (cf. DockerExecutor).
+    WORKSPACE_MOUNT = "/workspace"
+
+    def __init__(self, executor: object, workspace_path: str | None = None) -> None:
         self._executor = executor  # instance DockerExecutor
+        self._workspace = workspace_path or str(getattr(executor, "_workspace", "") or "")
+
+    def map_path(self, host_path: str) -> str:
+        """Le workspace hote est monte sous /workspace dans le container."""
+        if not self._workspace:
+            return str(host_path)
+        mapped = str(host_path).replace(str(self._workspace), self.WORKSPACE_MOUNT)
+        return mapped.replace("\\", "/")
 
     async def is_available(self) -> bool:
 

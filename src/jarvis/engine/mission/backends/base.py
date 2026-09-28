@@ -46,3 +46,15 @@ class ExecutionBackend(ABC):
     def name(self) -> str:
         """Nom lisible du backend (logs)."""
         return self.__class__.__name__
+
+    def map_path(self, host_path: str) -> str:
+        """Traduit un chemin de la machine hote vers la vue du backend.
+
+        Identique par defaut : un backend qui execute sur l'hote voit les
+        memes chemins que l'hote. Seul Docker redefinit cette methode, parce
+        que le workspace y est monte sous /workspace. Sans ce point
+        d'extension, l'appelant devait deviner le backend — et reecrivait le
+        chemin vers /workspace meme en execution locale, ce qui donnait
+        « C:\\workspace\\... : No such file or directory » sur Windows.
+        """
+        return str(host_path)

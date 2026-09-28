@@ -96,7 +96,19 @@ class Gateway:
             )
 
             route, text_stream = await SpeedRouter.extract_route(raw_stream)
-            logger.debug("Route detected", route=route.value)
+
+            # Le tag vient du LLM. Quand la demande nomme elle-même la mission,
+            # on ne lui laisse pas le choix : « lance une mission : … » partait
+            # en [CF] et tombait dans execute_script au lieu de créer un projet.
+            if SpeedRouter.explicit_project(message) and route is not RouteEnum.PROJECT:
+                logger.info(
+                    f"Route forcée {route.value} → BG:PROJECT (mission demandée explicitement)"
+                )
+                route = RouteEnum.PROJECT
+
+            # f-string et non kwargs : le format de log du projet ne rend pas
+            # les kwargs loguru, et « Route detected » sans la route ne sert a rien.
+            logger.debug(f"Route detected: {route.value}")
 
             agent = self._agent
             notifications = self._notifications

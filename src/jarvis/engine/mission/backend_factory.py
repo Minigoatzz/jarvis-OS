@@ -42,7 +42,7 @@ def get_backend(
 
     if config.default_backend in (BackendType.AUTO, BackendType.DOCKER):
         if docker_executor is not None and settings.docker_enabled:
-            return DockerBackend(docker_executor)
+            return DockerBackend(docker_executor, workspace_path)
 
         if config.default_backend == BackendType.DOCKER:
             logger.error(

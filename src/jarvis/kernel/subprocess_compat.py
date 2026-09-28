@@ -70,15 +70,28 @@ def _run_blocking(
     timeout: int,
 ) -> RunResult:
     """Appel bloquant, execute dans un thread par les fonctions publiques."""
-    completed = subprocess.run(  # noqa: S602,S603 — whitelist appliquee en amont
-        command,
-        shell=shell,
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(  # noqa: S602,S603 — whitelist appliquee en amont
+            command,
+            shell=shell,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    # Cas prevu et traduit, pas une panne a collecter : on relaie l'erreur
+    # en y ajoutant le nom du binaire manquant.
+    except FileNotFoundError as exc:  # jrv: pas de code — cas prevu
+        # « [WinError 2] The system cannot find the file specified » ne dit pas
+        # QUEL fichier. Sur Windows c'est presque toujours un binaire POSIX
+        # absent (touch, cat, ls, grep...) : sans le nom, l'utilisateur comme
+        # le modele sont incapables de corriger.
+        binaire = command if isinstance(command, str) else (command[0] if command else "?")
+        raise FileNotFoundError(
+            f"Commande introuvable : '{binaire}'. "
+            f"Ce binaire n'existe pas sur cette machine."
+        ) from exc
 
     def _decode(raw: bytes | str | None) -> str:
         if raw is None:

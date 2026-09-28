@@ -33,7 +33,33 @@ _TAG_SEARCH_RE = re.compile(r"\[(I|CF|BG:PROJECT|BG)\]\s?", re.IGNORECASE)
 # Ne pas matcher [MINDMAP], [/MINDMAP] ou tout tag > 3 lettres
 _ANY_TAG_RE = re.compile(r"^\[[A-Z]{1,3}(?::[A-Z]+)?\]\s?")
 
+# ── Demande EXPLICITE de mission ─────────────────────────────────────────────
+# Le tag de routage est émis par le LLM. Un modèle local de 14B se trompe :
+# « lance une mission : crée un fichier bonjour.txt » repartait en [CF] et
+# finissait dans execute_script au lieu de créer un projet. Quand l'utilisateur
+# nomme lui-même la mission, il n'y a rien à deviner — on ne délègue pas au
+# modèle une intention déjà écrite noir sur blanc.
+_EXPLICIT_PROJECT_RE = re.compile(
+    r"\b(?:lance|lancer|démarre|démarrer|demarre|crée|créer|cree|creer|"
+    r"nouvelle|nouveau|ouvre|ouvrir)\s+"
+    r"(?:moi\s+)?(?:une?\s+|le\s+|la\s+)?"
+    r"(?:mission|projet\s+agent|projet\s+autonome)\b"
+    r"|^\s*(?:mission|projet)\s*:",
+    re.IGNORECASE,
+)
+
+# Contre-exemples : consulter ou supprimer une mission n'en crée pas une.
+_PROJECT_CONSULT_RE = re.compile(
+    r"\b(?:montre|affiche|liste|lister|statut|état|etat|avancement|"
+    r"où\s+en\s+est|ou\s+en\s+est|supprime|supprimer|annule|annuler|"
+    r"arrête|arreter|arrête|tue|relance)\b",
+    re.IGNORECASE,
+)
+
 # Mots-clés domotiques / actions → pré-route CONFIRM_FIRE.
+# ATTENTION : contient « lance » et « démarre ». heuristic() n'est appelé
+# NULLE PART aujourd'hui ; si quelqu'un le branche un jour, « lance une
+# mission » retomberait en CF. Passer par explicit_project() d'abord.
 _CF_PATTERNS = re.compile(
     r"\b(allume|éteins|lumière|lampe|thermostat|minuteur|timer|rappel|note|"
     r"souviens|mémorise|programme|règle|lance|démarre|arrête|ouvre|ferme)\b",
@@ -56,6 +82,19 @@ class SpeedRouter:
         if _CF_PATTERNS.search(message):
             return RouteEnum.CONFIRM_FIRE
         return RouteEnum.INSTANT
+
+    @staticmethod
+    def explicit_project(message: str) -> bool:
+        """Vrai si l'utilisateur demande explicitement de lancer une mission.
+
+        Déterministe, et prioritaire sur le tag du modèle : quand la demande
+        dit « lance une mission », la route est connue sans avoir à faire
+        confiance au LLM. Consulter, arrêter ou supprimer une mission n'en
+        crée pas une — d'où le garde-fou négatif.
+        """
+        if _PROJECT_CONSULT_RE.search(message):
+            return False
+        return bool(_EXPLICIT_PROJECT_RE.search(message))
 
     @staticmethod
     def strip_tag(text: str) -> str:

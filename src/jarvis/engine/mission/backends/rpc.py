@@ -123,9 +123,11 @@ class ScriptRPCRunner:
         rpc_dir = self._workspace / ".jarvis_rpc" / run_id
         rpc_dir.mkdir(parents=True, exist_ok=True)
 
-        # Chemin du rpc_dir tel que vu depuis le backend.
-        # Pour Docker : workspace → /workspace (volume monté).
-        backend_rpc = str(rpc_dir).replace(str(self._workspace), "/workspace")
+        # Chemin du rpc_dir tel que vu depuis le backend. On le DEMANDE au
+        # backend : la version précédente réécrivait toujours vers /workspace,
+        # le chemin du container, y compris en exécution locale — d'où
+        # « C:\\workspace\\.jarvis_rpc\\... : No such file or directory ».
+        backend_rpc = self._backend.map_path(str(rpc_dir))
 
         (rpc_dir / "jarvis_tools.py").write_text(
             _build_stub(backend_rpc, list(allowed_tools)),
@@ -197,8 +199,10 @@ class ScriptRPCRunner:
         script_path = f"{backend_rpc}/user_script.py"
 
         try:
+            # Les guillemets sont indispensables : un chemin Windows contient
+            # « C:\\Users\\... » et peut comporter des espaces.
             result = await self._backend.execute(
-                f"python3 {script_path}",
+                f'python3 "{script_path}"',
                 timeout=timeout,
             )
         finally:
