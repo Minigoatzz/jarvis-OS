@@ -149,7 +149,9 @@ class ScriptRPCTool(Tool):
 
         # Workspace : injecté à la construction ou répertoire temporaire
         if self._workspace_path:
-            workspace = Path(self._workspace_path)
+            # resolve() : le chemin vient de settings.memory_dir, qui est relatif.
+            workspace = Path(self._workspace_path).resolve()
+            workspace.mkdir(parents=True, exist_ok=True)
         else:
             workspace = Path(tempfile.mkdtemp(prefix="jarvis-rpc-"))
 

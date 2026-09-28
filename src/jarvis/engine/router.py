@@ -48,6 +48,26 @@ _EXPLICIT_PROJECT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Verbes de PRODUCTION. Un fichier demandé avec l'un d'eux est un livrable,
+# et system_static.md le dit déjà : « Tout contenu qu'on voudrait sauvegarder,
+# copier, envoyer — même si ça tient en 1 fichier » → [BG:PROJECT]. On cesse
+# de demander au modèle d'appliquer une règle qu'on peut appliquer nous-mêmes.
+_PRODUCE = (
+    r"(?:cr[ée]e|cr[ée]er|[ée]cris|[ée]crire|g[ée]n[èe]re|g[ée]n[ée]rer|"
+    r"r[ée]dige|r[ée]diger|fabrique|pr[ée]pare|enregistre|sauvegarde)"
+)
+
+# « crée un fichier … », « écris trois fichiers … », « génère rapport.md »
+_FILE_DELIVERABLE_RE = re.compile(
+    rf"\b{_PRODUCE}\s+(?:moi\s+)?"
+    rf"(?:un|une|le|la|les|des|mes|\d+|deux|trois|quatre|cinq|plusieurs)?\s*"
+    rf"(?:nouveaux?\s+|nouvelles?\s+|petits?\s+)?"
+    rf"(?:fichiers?|scripts?|programmes?)\b"
+    rf"|\b{_PRODUCE}\s+(?:moi\s+)?(?:un|une|le|la)?\s*"
+    rf"[\w\-]+\.(?:txt|md|py|js|ts|html|css|json|csv|ya?ml|sh|ps1|sql)\b",
+    re.IGNORECASE,
+)
+
 # Contre-exemples : consulter ou supprimer une mission n'en crée pas une.
 _PROJECT_CONSULT_RE = re.compile(
     r"\b(?:montre|affiche|liste|lister|statut|état|etat|avancement|"
@@ -92,9 +112,11 @@ class SpeedRouter:
         confiance au LLM. Consulter, arrêter ou supprimer une mission n'en
         crée pas une — d'où le garde-fou négatif.
         """
-        if _PROJECT_CONSULT_RE.search(message):
-            return False
-        return bool(_EXPLICIT_PROJECT_RE.search(message))
+        if _EXPLICIT_PROJECT_RE.search(message):
+            # Le garde-fou négatif ne vaut que pour la branche « mission » :
+            # « crée trois fichiers puis supprime temp.txt » reste une création.
+            return not _PROJECT_CONSULT_RE.search(message)
+        return bool(_FILE_DELIVERABLE_RE.search(message))
 
     @staticmethod
     def strip_tag(text: str) -> str:

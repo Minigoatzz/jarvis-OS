@@ -102,7 +102,11 @@ class ScriptRPCRunner:
     ) -> None:
         self._backend = backend
         self._registry = tool_registry
-        self._workspace = workspace
+        # .resolve() obligatoire : settings.memory_dir est relatif, et le
+        # backend local exécute avec cwd=workspace. Un chemin relatif s'y
+        # recollait une seconde fois, d'où un « memory_data\rpc_workspace »
+        # dupliqué dans le chemin du script.
+        self._workspace = Path(workspace).resolve()
 
     async def run(
         self,

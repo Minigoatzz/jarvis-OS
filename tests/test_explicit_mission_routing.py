@@ -51,7 +51,6 @@ def test_une_demande_explicite_de_mission_est_reconnue(message: str) -> None:
         "où en est la mission ?",
         "liste les missions",
         "relance la mission",
-        "crée trois fichiers de test",
         "joue Red House",
         "lance la musique",
         "quelle est la mission de cette entreprise",
@@ -118,3 +117,63 @@ def test_un_binaire_introuvable_est_nomme() -> None:
     message = describe_exception(info.value)
     assert "binaire_absent_xyz" in message
     assert "introuvable" in message.lower()
+
+
+# ── Un livrable fichier est une mission, sans avoir a dire « mission » ──────
+# system_static.md ligne 56 le prescrit deja : « Tout contenu qu'on voudrait
+# sauvegarder, copier, envoyer — meme si ca tient en 1 fichier ». On applique
+# la regle au lieu de demander a un 14B de l'appliquer.
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "crée un fichier bonjour.txt contenant la date du jour",
+        "crée trois fichiers de test",
+        "crée trois fichiers de test, puis supprime le fichier temp.txt",
+        "écris un script Python qui calcule les 100 premiers nombres premiers",
+        "génère rapport.md avec le résumé",
+        "rédige trois fichiers de prospection",
+        "sauvegarde un fichier avec mes notes",
+        "crée un script pour scraper ce site",
+    ],
+)
+def test_un_livrable_fichier_part_en_mission(message: str) -> None:
+    assert SpeedRouter.explicit_project(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "lis le fichier config.json",
+        "ouvre le fichier notes.txt",
+        "supprime le fichier temp.txt",
+        "montre-moi le fichier bonjour.txt",
+        "lance le script de sauvegarde",
+        "exécute le script",
+        "joue Red House",
+        "mets la musique en pause",
+        "montre-moi Paris sur le globe",
+        "quelle heure il est",
+    ],
+)
+def test_lire_lancer_ou_supprimer_ne_produit_aucun_livrable(message: str) -> None:
+    """Sur-declencher serait pire : chaque action banale deviendrait une mission."""
+    assert not SpeedRouter.explicit_project(message)
+
+
+# ── Le workspace RPC doit etre absolu ───────────────────────────────────────
+
+
+def test_le_workspace_rpc_est_resolu_en_absolu() -> None:
+    """settings.memory_dir est relatif, et le backend local execute avec
+    cwd=workspace : un chemin relatif s'y recollait une seconde fois, d'ou
+    « memory_data\\rpc_workspace\\memory_data\\rpc_workspace\\... »."""
+    import pathlib as _pl
+    from unittest.mock import MagicMock
+
+    from jarvis.engine.mission.backends.rpc import ScriptRPCRunner
+
+    runner = ScriptRPCRunner(MagicMock(), MagicMock(), _pl.Path("memory_data/rpc_workspace"))
+    assert runner._workspace.is_absolute()
+    assert str(runner._workspace).count("rpc_workspace") == 1
