@@ -12,6 +12,7 @@ from collections.abc import Callable
 from loguru import logger
 
 from jarvis.engine.budget import BudgetGuard
+from jarvis.engine.mission import announcements as mission_announcements
 from jarvis.engine.mission.file_tool import SandboxedFileTool
 from jarvis.engine.mission.project_manager import ProjectManager
 from jarvis.engine.mission.project_store import ProjectStore
@@ -27,10 +28,22 @@ from jarvis.engine.mission.worker_agent import WorkerAgent
 from jarvis.kernel.contracts import LLMProvider
 from jarvis.kernel.error_collector import collector  # jrv: autofix
 from jarvis.kernel.events import EventBus
+from jarvis.kernel.subprocess_compat import describe_exception
 
 # Délai de réponse à une demande d'approbation d'étape. Envoyé tel quel à la page
 # (`timeout_s`) pour qu'elle affiche le vrai temps restant : une seule source.
 _APPROVAL_TIMEOUT_S = 600
+
+
+class PlanRejectedError(ValueError):
+    """Plan refusé à la validation (étape sans critère de succès vérifiable).
+
+    Type distinct parce qu'un échec du PLANIFICATEUR lui-même lève aussi
+    parfois ValueError — json.JSONDecodeError en est une sous-classe. Sans ce
+    type, launch_in_background() ne pourrait pas distinguer « plan refusé,
+    déjà annoncé » de « planificateur en panne, à annoncer », et se tairait
+    sur le second.
+    """
 
 
 class ProjectOrchestrator:
@@ -104,6 +117,39 @@ class ProjectOrchestrator:
 
     # ── Création & lancement ──────────────────────────────────────────────────
 
+    def launch_in_background(self, mission: str, *, origin: str) -> asyncio.Task:
+        """Lance une mission sans bloquer — POINT D'ENTRÉE UNIQUE des interfaces.
+
+        Toute interface qui démarre une mission depuis un tour de conversation
+        (WebSocket, voix, initiative approuvée…) passe par ici. Ce lancement
+        existait en trois copies divergentes : websocket.py émettait un
+        événement `notification` qu'aucune page n'affichait, chat.py et
+        proactive.py faisaient un create_task nu qui n'attrapait rien — un
+        planificateur en panne finissait en « Task exception was never
+        retrieved » dans le log, et l'utilisateur restait sur « Mission lancée ».
+
+        Tout échec survenu AVANT que la mission existe est annoncé dans la
+        conversation. Après sa création, c'est le worker qui annonce la fin.
+
+        `origin` sert au nom de la tâche asyncio (lisible dans les logs).
+        """
+
+        async def _run() -> None:
+            try:
+                await self.create_and_run(mission)
+            except PlanRejectedError:
+                # jrv: pas de code — déjà collecté et annoncé par create_and_run
+                pass
+            except Exception as exc:
+                collector.error("JRV-MSN-001", "JRV-MSN-001", cause=exc)
+                detail = describe_exception(exc)
+                logger.error(f"Mission non créée ({origin}) : {detail}")
+                self._broadcast(
+                    mission_announcements.chat_message(mission_announcements.plan_invalid(detail))
+                )
+
+        return asyncio.create_task(_run(), name=f"mission-{origin}")
+
     async def create_and_run(self, mission: str, timeout_minutes: int = 30) -> Project:
         """Crée le projet (appel LLM de planification) et lance le worker en background.
 
@@ -131,7 +177,12 @@ class ProjectOrchestrator:
                     "error": str(exc),
                 }
             )
-            raise
+            # Sans ça, un plan refusé laissait la conversation sur « Mission
+            # lancée » pour toujours : l'utilisateur attendait une mission morte.
+            self._broadcast(
+                mission_announcements.chat_message(mission_announcements.plan_invalid(str(exc)))
+            )
+            raise PlanRejectedError(str(exc)) from exc
 
         worker = WorkerAgent(
             project=project,
@@ -152,16 +203,43 @@ class ProjectOrchestrator:
                 "project": self._project_summary(project),
             }
         )
+        # …et vers la conversation : seul le dashboard écoutait project_created,
+        # si bien qu'une mission réussie restait invisible depuis l'accueil.
+        self._broadcast(mission_announcements.chat_message(mission_announcements.created(project)))
 
-        asyncio.create_task(
-            asyncio.wait_for(worker.run(), timeout=project.timeout_minutes * 60),
-            name=f"worker-{project.id}",
-        )
+        self._start_worker(worker, project, name=f"worker-{project.id}")
 
         logger.info("Project launched", id=project.id, steps=len(project.steps))
         return project
 
     # ── Kill switch ───────────────────────────────────────────────────────────
+
+    def _start_worker(self, worker: WorkerAgent, project: Project, *, name: str) -> asyncio.Task:
+        """Démarre un worker — SEUL point de lancement (création, retry, reprise).
+
+        Ce lancement existait en trois copies identiques, et aucune ne gérait
+        l'expiration du délai : wait_for annulait run(), la mission restait
+        sauvegardée en RUNNING, et la TimeoutError finissait en « Task exception
+        was never retrieved ». Toute évolution du cycle de vie d'un worker
+        (délai, nettoyage, métriques) se fait ici, une fois.
+        """
+        minutes = project.timeout_minutes
+
+        async def _supervise() -> None:
+            try:
+                await asyncio.wait_for(worker.run(), timeout=minutes * 60)
+            except TimeoutError:
+                collector.error("JRV-MSN-001", "JRV-MSN-001")
+                logger.error(f"Mission {project.id} : délai dépassé ({minutes} min)")
+                worker.mark_timed_out(minutes)
+            finally:
+                # Un worker fini ne doit plus être « tuable » : kill() répondait
+                # True sur une mission terminée. L'identité protège le retry, qui
+                # a déjà pu enregistrer un NOUVEAU worker sous le même id.
+                if self._workers.get(project.id) is worker:
+                    del self._workers[project.id]
+
+        return asyncio.create_task(_supervise(), name=name)
 
     def kill(self, project_id: str) -> bool:
         worker = self._workers.get(project_id)
@@ -226,10 +304,7 @@ class ProjectOrchestrator:
             }
         )
 
-        asyncio.create_task(
-            asyncio.wait_for(worker.run(), timeout=project.timeout_minutes * 60),
-            name=f"retry-{project_id}",
-        )
+        self._start_worker(worker, project, name=f"retry-{project_id}")
         logger.info("Project retried", id=project_id)
         return project
 
@@ -275,10 +350,7 @@ class ProjectOrchestrator:
             }
         )
 
-        asyncio.create_task(
-            asyncio.wait_for(worker.run(), timeout=project.timeout_minutes * 60),
-            name=f"resume-{project_id}",
-        )
+        self._start_worker(worker, project, name=f"resume-{project_id}")
         logger.info("Project resumed from budget pause", id=project_id)
         return project
 

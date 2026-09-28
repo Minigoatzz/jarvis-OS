@@ -33,22 +33,20 @@ def _read(rel: str) -> str:
 # ── 1. Route PROJECT ────────────────────────────────────────────────────────
 
 
-def test_project_route_does_not_execute_written_tool_calls() -> None:
+# Ces deux tests vérifiaient la PRÉSENCE du texte `not is_project` dans le
+# source. Ils passaient, et le bug du 28/09 existait quand même : aucune de ces
+# gardes ne couvrait le chemin des appels NATIFS, et lire le source ne pouvait
+# pas le voir. La route PROJECT est désormais une seule couture en tête de
+# _pipe(), et son comportement est prouvé par test_project_route_behaviour.py,
+# qui pilote réellement Gateway.handle() et reproduit l'incident sur l'ancien
+# code. Ce qui reste ici ne vérifie que l'existence de la couture.
+
+
+def test_project_route_is_a_single_seam() -> None:
     src = _read("engine/gateway.py")
-    assert "is_project = route is RouteEnum.PROJECT" in src
-
-    block = src[src.index("is_project = route is RouteEnum.PROJECT") :]
-    extraction = block[: block.index("text_calls = agent.extract_text_tool_calls")]
-    assert "not is_project" in extraction, (
-        "l'analyse des appels écrits doit être sautée quand la mission fait le travail"
-    )
-
-
-def test_project_route_skips_the_retry_and_both_guards() -> None:
-    src = _read("engine/gateway.py")
-    assert "and not is_project\n                    and (route is RouteEnum.CONFIRM_FIRE" in src
-    assert "if asserts_action and not is_project:" in src
-    assert "if is_degenerate_reply(text) and not is_project:" in src
+    code = "\n".join(l for l in src.split("\n") if not l.lstrip().startswith("#"))
+    assert "if route is RouteEnum.PROJECT:" in code
+    assert "is_project" not in code, "plus aucune garde éparse : une seule couture"
 
 
 def test_other_routes_keep_their_guards() -> None:

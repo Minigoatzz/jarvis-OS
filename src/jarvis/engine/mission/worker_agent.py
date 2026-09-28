@@ -17,6 +17,7 @@ from loguru import logger
 
 from jarvis.engine.audit import AuditLog
 from jarvis.engine.budget import BudgetGuard
+from jarvis.engine.mission import announcements as mission_announcements
 from jarvis.engine.mission.docker_executor import DockerExecutor
 from jarvis.engine.mission.file_tool import SandboxedFileTool
 from jarvis.engine.mission.governance import GateContext, GateDecision, Governance
@@ -34,6 +35,7 @@ from jarvis.kernel.errors import BudgetExceeded
 from jarvis.kernel.events import EventBus, MissionCompleted
 from jarvis.kernel.paths import PROMPTS_DIR
 from jarvis.kernel.settings import settings
+from jarvis.kernel.subprocess_compat import describe_exception
 
 # ── Constantes PHASE 1 ─────────────────────────────────────────────────────────
 
@@ -251,6 +253,9 @@ class WorkerAgent:
         # commande hors whitelist, garde de script). Ils portent la vraie cause
         # d'un échec ; sans eux l'utilisateur ne lit que « trop d'étapes ».
         self._blockers: list[str] = []
+        # Cause d'un échec qui ne tient à aucune étape (exception, étape restée
+        # PENDING) — sans elle l'annonce de fin dirait « échouée » sans raison.
+        self._failure_reason: str | None = None
         # PHASE 1 — governance et verifier (injection ou construction tardive).
         self._governance = governance
         self._verifier = verifier
@@ -334,9 +339,13 @@ class WorkerAgent:
         await self._log("info", f"Démarrage : {project.title}")
         self._push_update()
 
-        await self._setup_environment()
-
         try:
+            # DANS le try, pas avant : s'il lève (Docker qui ne démarre pas…),
+            # l'exception sortait de run() sans passer par `finally`. La mission
+            # restait RUNNING indéfiniment, jamais sauvegardée comme échouée, et
+            # seule la réconciliation au redémarrage suivant la rattrapait.
+            await self._setup_environment()
+
             for step in project.steps:
                 if step.status in (StepStatus.DONE, StepStatus.SKIPPED):
                     continue  # déjà complétée — on ne re-exécute pas
@@ -364,6 +373,7 @@ class WorkerAgent:
                     project.status = ProjectStatus.FAILED
                     project.completed_at = datetime.now()
                     titles = ", ".join(s.title for s in unfinished[:3])
+                    self._failure_reason = f"étape(s) jamais exécutée(s) : {titles}"
                     await self._log(
                         "error",
                         f"Mission incomplète — {len(unfinished)} étape(s) jamais exécutée(s) : "
@@ -398,7 +408,8 @@ class WorkerAgent:
         except Exception as e:
             collector.error("JRV-MSN-001", "JRV-MSN-001", cause=e)
             project.status = ProjectStatus.FAILED
-            await self._log("error", f"Erreur inattendue : {e}")
+            self._failure_reason = describe_exception(e)
+            await self._log("error", f"Erreur inattendue : {self._failure_reason}")
         finally:
             # PHASE 2 §5.1 — réflexion post-mission sur statut terminal.
             # PAUSED est exclu (mission reprenable). Best-effort, jamais bloquant.
@@ -428,6 +439,7 @@ class WorkerAgent:
                 await self._docker.stop()
             self._store.save_project(project)
             self._push_update()
+            self._announce_finished()
 
     async def _maybe_reflect(self) -> None:
         """Appelle Reflexion si terminale + injectée. Dégrade silencieusement sinon."""
@@ -815,6 +827,66 @@ class WorkerAgent:
             collector.error("JRV-MSN-001", "JRV-MSN-001", cause=e)
             await self._log("error", f"Tool error {name}: {e}")
             return f"Erreur : {e}"
+
+    def mark_timed_out(self, minutes: int) -> None:
+        """Clôt la mission quand l'orchestrateur a dépassé son délai.
+
+        `asyncio.wait_for` ANNULE run() à l'expiration. CancelledError n'est pas
+        une Exception : le `except` de run() ne la voyait pas, et `finally`
+        sauvegardait la mission telle quelle — en RUNNING. Elle y restait
+        jusqu'au prochain redémarrage, sans aucune annonce. Appelé par
+        l'orchestrateur une fois l'annulation terminée.
+        """
+        project = self._project
+        if project.status in (ProjectStatus.DONE, ProjectStatus.FAILED, ProjectStatus.KILLED):
+            return
+        cause = f"délai de la mission dépassé ({minutes} min)"
+        for step in project.steps:
+            if step.status in (StepStatus.RUNNING, StepStatus.WAITING_APPROVAL):
+                step.status = StepStatus.FAILED
+                step.error = cause
+        project.status = ProjectStatus.FAILED
+        project.completed_at = datetime.now()
+        self._failure_reason = cause
+        self._store.save_project(project)
+        self._push_update()
+        self._announce_finished()
+
+    def _announce_finished(self) -> None:
+        """Annonce la fin de mission — succès, échec ou arrêt — une seule fois.
+
+        `project_done` n'était émis qu'en cas de SUCCÈS : une mission échouée ne
+        produisait aucun événement terminal propre, seulement un project_update
+        générique. Personne ne pouvait dire « ta mission a échoué » sans deviner.
+
+        Deux événements, depuis ce seul point de `finally` :
+        - `project_finished` (structuré) pour qui veut réagir à la fin, quel que
+          soit le statut — c'est le point d'extension à utiliser ;
+        - un message sur le canal passif, que la page d'accueil affiche déjà.
+        `project_done` reste émis au succès, pour les écouteurs existants.
+        """
+        project = self._project
+        if project.status not in (
+            ProjectStatus.DONE,
+            ProjectStatus.FAILED,
+            ProjectStatus.KILLED,
+        ):
+            return  # PAUSED, ou run() interrompu : pas une fin.
+        self._broadcast(
+            {
+                "type": "project_finished",
+                "project_id": project.id,
+                "title": project.title,
+                "status": str(project.status),
+                "files": list(project.files_created),
+                "reason": self._failure_reason,
+            }
+        )
+        self._broadcast(
+            mission_announcements.chat_message(
+                mission_announcements.finished(project, reason=self._failure_reason)
+            )
+        )
 
     def _note_blocker(self, message: str) -> None:
         """Mémorise un refus de politique, sans doublon, pour le rapport d'échec."""

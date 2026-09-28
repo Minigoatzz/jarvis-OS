@@ -72,7 +72,6 @@ async def get_initiatives() -> list[dict]:
 
 @router.post("/api/initiatives/{initiative_id}/approve")
 async def approve_initiative(initiative_id: str, request: Request) -> dict:
-    import asyncio
 
     store = InitiativeStore()
     init = store.get_by_id(initiative_id)
@@ -96,9 +95,8 @@ async def approve_initiative(initiative_id: str, request: Request) -> dict:
             orchestrator = getattr(request.app.state, "orchestrator", None)
             if orchestrator:
                 mission = init.mission_description or init.action
-                asyncio.create_task(
-                    orchestrator.create_and_run(mission),
-                    name=f"initiative-{initiative_id[:8]}",
+                orchestrator.launch_in_background(
+                    mission, origin=f"initiative-{initiative_id[:8]}"
                 )
                 result["mission_launched"] = True
                 _log.info(f"Initiative {initiative_id}: mission lancée", mission=mission[:60])

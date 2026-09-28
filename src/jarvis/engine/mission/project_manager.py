@@ -6,16 +6,18 @@
 
 from __future__ import annotations
 
-import json
-import re
-
 from loguru import logger
 
+from jarvis.engine.mission.plan_normalizer import (
+    extract_plan_json,
+    is_generated_report_step,
+    normalize_plan,
+    renumber_steps,
+)
 from jarvis.engine.mission.project_store import ProjectStore
 from jarvis.engine.mission.schemas import Project, Step, StepStatus
 from jarvis.engine.vocab import AccessLevel
 from jarvis.kernel.contracts import LLMProvider
-from jarvis.kernel.error_collector import collector  # jrv: autofix
 
 _PLANNING_SYSTEM = """\
 Tu es un chef de projet expert. Analyse la demande utilisateur et décompose-la en étapes
@@ -132,16 +134,16 @@ class ProjectManager:
             system=_PLANNING_SYSTEM,
             stream=False,
         )
-        assert isinstance(raw, str)
-
-        plan = self._parse_plan(raw)
+        # Frontière LLM → moteur : tout ce qui suit a été vérifié et typé par
+        # plan_normalizer. Plus de step["id"] en dur, plus de .strip() sur None.
+        plan = normalize_plan(extract_plan_json(str(raw or "")), mission=mission)
         plan = self._add_quality_steps(plan)
         project = self._store.create_project(
             mission=mission,
             title=plan["title"],
             timeout_minutes=timeout_minutes,
         )
-        project.requires_network = bool(plan.get("requires_network", False))
+        project.requires_network = plan["requires_network"]
 
         for step_data in plan["steps"]:
             project.steps.append(
@@ -149,14 +151,12 @@ class ProjectManager:
                     id=step_data["id"],
                     title=step_data["title"],
                     description=step_data["description"],
-                    requires_approval=step_data.get("requires_approval", False),
+                    requires_approval=step_data["requires_approval"],
                     status=StepStatus.PENDING,
                     # PHASE 1 — champs vérification & gouvernance (§3.4)
-                    success_criterion=step_data.get("success_criterion", "").strip(),
-                    verification_command=step_data.get("verification_command") or None,
-                    access_level=AccessLevel(
-                        int(step_data.get("access_level", int(AccessLevel.WRITE_LOCAL)))
-                    ),
+                    success_criterion=step_data["success_criterion"],
+                    verification_command=step_data["verification_command"],
+                    access_level=AccessLevel(step_data["access_level"]),
                 )
             )
 
@@ -176,11 +176,14 @@ class ProjectManager:
         project_type = plan.get("project_type", "generic")
         steps = plan["steps"]
 
-        # Retire les doublons que le LLM aurait pu générer
+        # Retire les doublons que le LLM aurait pu générer : SA propre étape
+        # RAPPORT.md (le prompt lui demande de l'inclure). Surtout pas toute étape
+        # contenant « rapport » : c'était le cas, et « rédige un rapport sur ma
+        # semaine » perdait l'étape qui écrivait le rapport demandé.
         steps = [
             s
             for s in steps
-            if "rapport" not in s.get("title", "").lower() and "test" not in s.get("id", "").lower()
+            if not is_generated_report_step(s) and "test" not in s.get("id", "").lower()
         ]
 
         n = len(steps)
@@ -208,7 +211,9 @@ class ProjectManager:
         steps.append(test_step)
         if project_type != "fusion_360":
             steps.append(rapport_step)
-        plan["steps"] = steps
+        # Les ids ci-dessus étaient calculés sur le NOMBRE d'étapes, ceux du modèle
+        # ne sont pas fiables : collisions constatées (step_003 deux fois).
+        plan["steps"] = renumber_steps(steps)
         return plan
 
     def _add_test_step(self, project_type: str, step_num: int) -> dict:
@@ -316,10 +321,5 @@ class ProjectManager:
         }
 
     def _parse_plan(self, raw: str) -> dict:
-        clean = re.sub(r"```json|```", "", raw).strip()
-        try:
-            return json.loads(clean)
-        except json.JSONDecodeError as e:
-            collector.error("JRV-MSN-001", "JRV-MSN-001", cause=e)
-            logger.error("Plan parse failed", error=str(e), raw=raw[:300])
-            raise ValueError(f"Impossible de parser le plan LLM : {e}") from e
+        """Compatibilité : délègue à plan_normalizer.extract_plan_json."""
+        return extract_plan_json(raw)

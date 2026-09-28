@@ -29,6 +29,11 @@ _TAG_RE = re.compile(r"^\[(I|CF|BG:PROJECT|BG)\]\s?", re.IGNORECASE)
 # Variante sans ancre — cherche le tag n'importe où dans la fenêtre de buffer.
 _TAG_SEARCH_RE = re.compile(r"\[(I|CF|BG:PROJECT|BG)\]\s?", re.IGNORECASE)
 
+# Caractères de mise en forme dont un modèle local enrobe parfois son tag :
+# « `[I]` », « **[CF]** », « ```\n[I] ». Observé le 28/09 : « `[I]` Fait. »
+# s'affichait « `` Fait. » — les deux accents graves restaient autour du tag.
+_DECOR_CHARS = " \t\r\n`*_"
+
 # Filtre les tags routing inconnus courts (ex: [C], [A], [X]…)
 # Ne pas matcher [MINDMAP], [/MINDMAP] ou tout tag > 3 lettres
 _ANY_TAG_RE = re.compile(r"^\[[A-Z]{1,3}(?::[A-Z]+)?\]\s?")
@@ -141,8 +146,16 @@ class SpeedRouter:
         buffer = ""
         async for chunk in stream:
             buffer += chunk
-            if "]" in buffer or "\n" in buffer or len(buffer) >= 80:
+            if "]" in buffer or len(buffer) >= 80:
                 break
+            # Un retour à la ligne clôt la fenêtre SEULEMENT s'il suit du vrai
+            # texte. Précédé de pure mise en forme (« ```\n »), le tag n'est pas
+            # encore arrivé : s'arrêter là laissait « [I] » affiché en clair.
+            if "\n" in buffer:
+                content = buffer.strip(_DECOR_CHARS)
+                # « [ » : un tag est en train d'arriver — on attend son « ] ».
+                if content and not content.startswith("["):
+                    break
 
         # Essai 1 : tag strictement en début de buffer (cas nominal).
         match = _TAG_RE.match(buffer)
@@ -155,7 +168,7 @@ class SpeedRouter:
                 route = RouteEnum.INSTANT
             prefix = ""
             stripped = _TAG_RE.sub("", buffer)
-            tag_consumed_all = not stripped
+            tag_found = True
         else:
             # Essai 2 : tag dans la fenêtre après un éventuel préambule.
             search = _TAG_SEARCH_RE.search(buffer)
@@ -167,8 +180,30 @@ class SpeedRouter:
                     collector.error("JRV-ENG-000", "JRV-ENG-000")
                     route = RouteEnum.INSTANT
                 prefix = buffer[: search.start()]
-                stripped = buffer[search.end() :]
-                tag_consumed_all = not stripped
+                # On coupe juste après le « ] », SANS l'espace que `\s?` avale :
+                # cet espace est le séparateur de « D'accord.[CF] Je », et c'est la
+                # règle d'espacement plus bas — pas le hasard du découpage — qui
+                # décide de le garder ou non.
+                stripped = buffer[search.end(1) + 1 :]
+                # Préambule qui n'est QUE de la mise en forme : c'est un tag
+                # enrobé, pas une phrase. On retire l'enrobage ouvrant et son
+                # symétrique fermant — lui seul, pour ne pas casser un vrai gras
+                # qui suivrait (« `[I]` **Attention** » garde **Attention**).
+                if not prefix.strip(_DECOR_CHARS):
+                    closing = prefix.strip(" \t\r\n")
+                    # La fenêtre s'arrête au « ] » : l'enrobage fermant est
+                    # souvent dans le chunk SUIVANT, pas encore lu. Le découpage
+                    # du flux étant arbitraire, on lit juste assez pour le voir.
+                    while closing and len(stripped) <= len(closing):
+                        try:
+                            stripped += await anext(stream)
+                        except StopAsyncIteration:  # jrv: pas de code — fin normale du flux
+                            break
+                    if closing and stripped.startswith(closing):
+                        stripped = stripped[len(closing) :]
+                    stripped = stripped.lstrip(" ")
+                    prefix = ""
+                tag_found = True
             else:
                 # Aucun tag — fallback sur pre_route si CF, sinon INSTANT.
                 if pre_route is RouteEnum.CONFIRM_FIRE:
@@ -178,14 +213,25 @@ class SpeedRouter:
                     route = RouteEnum.INSTANT
                 prefix = ""
                 stripped = _ANY_TAG_RE.sub("", buffer)
-                tag_consumed_all = not stripped
+                tag_found = False
+
+        # L'espace qui suit le tag ne doit pas dépendre du découpage du flux.
+        # `\s?` ne le mange que s'il est DÉJÀ dans la fenêtre ; sinon il arrive
+        # au chunk suivant, et « D'accord. [CF] Je lance. » sortait avec deux
+        # espaces selon l'endroit où tombait la coupure. Règle : après un tag,
+        # on retire les espaces de tête sauf si le préambule se termine par du
+        # texte collé (« D'accord.[CF] Je » garde son unique espace).
+        eat_spaces = tag_found and (not prefix or prefix[-1].isspace())
+        if eat_spaces:
+            stripped = stripped.lstrip(" ")
+        tag_consumed_all = not stripped
 
         logger.debug("SpeedRouter", route=route.value)
 
         async def _tail() -> AsyncIterator[str]:
             if prefix:
                 yield prefix
-            lstrip_next = tag_consumed_all and not prefix
+            lstrip_next = tag_consumed_all and eat_spaces
             if stripped:
                 yield stripped
             async for chunk in stream:

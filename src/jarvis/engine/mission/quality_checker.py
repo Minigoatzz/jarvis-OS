@@ -31,8 +31,10 @@ class QualityChecker:
         """Liste tous les fichiers du workspace (hors .jarvis) avec métadonnées."""
         files = []
         for f in self._workspace.rglob("*"):
-            if f.is_file() and ".jarvis" not in str(f):
-                rel = str(f.relative_to(self._workspace))
+            relative = f.relative_to(self._workspace)
+            # Même règle que SandboxedFileTool : chemin relatif, séparateur POSIX.
+            if f.is_file() and not any(p.startswith(".jarvis") for p in relative.parts):
+                rel = relative.as_posix()
                 files.append(
                     {
                         "path": rel,

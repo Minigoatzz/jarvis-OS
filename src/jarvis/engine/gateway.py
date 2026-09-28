@@ -18,6 +18,7 @@ from jarvis.engine.agent import (
 from jarvis.engine.background.notifications import NotificationQueue
 from jarvis.engine.background.worker import BackgroundWorker
 from jarvis.engine.llm_errors import friendly_llm_error
+from jarvis.engine.mission import announcements as mission_announcements
 from jarvis.engine.router import RouteEnum, SpeedRouter
 from jarvis.engine.session import Session, SessionManager
 from jarvis.kernel.contracts import CrossSessionRecall
@@ -114,6 +115,34 @@ class Gateway:
             notifications = self._notifications
 
             async def _pipe() -> AsyncIterator[str]:
+                # ── Route PROJECT : une seule couture ─────────────────────────
+                # La mission que l'interface lance juste après `done` EST l'action.
+                # Ici on n'exécute RIEN — ni appel natif, ni appel écrit en texte,
+                # ni relance — et on ne laisse pas parler le premier jet du modèle.
+                #
+                # Avant, cette route était gérée par cinq gardes éparses, et aucune
+                # ne couvrait les deux points qui démarrent les appels NATIFS. Le
+                # 28/09 : route forcée I → PROJECT, le modèle a émis execute_script
+                # en natif, l'outil a tourné (approbation code_write incluse), et
+                # le chat a affiché sa synthèse — « Fait. Le fichier a été créé » —
+                # pendant que la VRAIE mission (proj_6cf963) réussissait en
+                # silence. Deux exécutions pour une demande, et l'utilisateur n'a
+                # vu que la mauvaise.
+                #
+                # Le premier jet n'est pas affiché non plus : quand la route a été
+                # forcée, le modèle a écrit une réponse [I] qui affirme un résultat
+                # qui n'existe pas encore. La réponse est déterministe
+                # (announcements.launch_ack) ; les annonces de création et de fin
+                # arrivent ensuite par le canal passif, depuis le moteur de mission.
+                if route is RouteEnum.PROJECT:
+                    yield mission_announcements.launch_ack()
+                    # Le flux est vidé sans être affiché : le laisser ouvert
+                    # garderait la connexion au LLM jusqu'au ramasse-miettes.
+                    # Vider n'exécute rien — seul create_task() lance un outil.
+                    async for _ in text_stream:
+                        pass
+                    return
+
                 tool_task: asyncio.Task | None = None
                 ack_text = ""  # Accumule le texte streamé avant les outils
                 held: list[str] = []
@@ -175,18 +204,9 @@ class Gateway:
                 # le même function calling natif qui ne répond pas, et se contentait
                 # donc de répéter la même phrase — l'utilisateur voyait sa demande
                 # énoncée deux fois sans que rien ne s'exécute.
-                # Route PROJECT : la mission lancée juste après par l'interface EST
-                # l'action. Exécuter en plus un appel d'outil écrit dans l'accusé de
-                # réception n'a aucun sens — et le 23/09 ça a produit pire : le modèle
-                # a tenté `execute_cli echo …`, l'outil a refusé, et l'utilisateur a lu
-                # « rien n'a changé » pendant qu'une mission démarrait 3 s plus tard.
-                is_project = route is RouteEnum.PROJECT
-                if (
-                    tool_task is None
-                    and tool_capture is not None
-                    and not tool_capture.calls
-                    and not is_project
-                ):
+                # (La route PROJECT est traitée en tête de _pipe() et n'arrive
+                # jamais jusqu'ici : aucune des branches suivantes n'a à s'en soucier.)
+                if tool_task is None and tool_capture is not None and not tool_capture.calls:
                     text_calls = agent.extract_text_tool_calls(ack_text)
                     if text_calls:
                         logger.warning(
@@ -220,7 +240,6 @@ class Gateway:
                 if (
                     tool_task is None
                     and tool_capture is not None
-                    and not is_project
                     and (route is RouteEnum.CONFIRM_FIRE or asserts_action or degenerate)
                 ):
                     forced = await agent.force_tool_call(message)
@@ -251,7 +270,7 @@ class Gateway:
                     # affirme pourtant que l'action est faite. Laisser passer,
                     # c'est mentir à l'utilisateur — le symptôme qui revient
                     # depuis le début (musique non pausée, vue non affichée).
-                    if asserts_action and not is_project:
+                    if asserts_action:
                         logger.warning(
                             "Affirmation d'action sans exécution — réponse remplacée",
                             ack=text[:120],
@@ -265,7 +284,7 @@ class Gateway:
                     # « [Cockpit] » tout seul : ce n'est pas une réponse. La
                     # rendre telle quelle donne à l'utilisateur un jeton brut
                     # sans rien lui dire de ce qui a échoué.
-                    if is_degenerate_reply(text) and not is_project:
+                    if is_degenerate_reply(text):
                         logger.warning(
                             f"Réponse dégénérée remplacée — brut : {text.strip()[:80]!r}"
                         )

@@ -133,9 +133,10 @@ async def voice_generate(body: VoiceGenerateRequest, request: Request) -> Stream
         if route is RouteEnum.BACKGROUND:
             worker.submit(BackgroundTask(session_id=str(session.id), instruction=message_original))
         elif route is RouteEnum.PROJECT and orchestrator:
-            asyncio.create_task(
-                orchestrator.create_and_run(message_original),
-                name=f"voice-project-{str(session.id)[:8]}",
+            # Était un create_task nu : un planificateur en panne mourait en
+            # silence. Le point d'entrée unique annonce l'échec.
+            orchestrator.launch_in_background(
+                message_original, origin=f"voice-{str(session.id)[:8]}"
             )
 
         asyncio.create_task(

@@ -13,6 +13,17 @@ from loguru import logger
 from jarvis.engine.mission import script_guard
 
 
+def _is_internal(rel: Path) -> bool:
+    """Vrai pour les fichiers internes de Jarvis (.jarvis/, .jarvis_rpc/…).
+
+    Testé sur le chemin RELATIF au workspace. L'ancien filtre
+    `".jarvis" not in str(p)` portait sur le chemin absolu : un workspace
+    rangé sous un dossier dont le nom contient « .jarvis » aurait vu tous ses
+    fichiers disparaître.
+    """
+    return any(part.startswith(".jarvis") for part in rel.parts)
+
+
 class SandboxedFileTool:
     def __init__(self, workspace_path: str, *, allow_network: bool = False) -> None:
         self._workspace = Path(workspace_path).resolve()
@@ -51,14 +62,24 @@ class SandboxedFileTool:
         return f"Fichier écrit : {path} ({len(content)} caractères)"
 
     def list_files(self, directory: str = ".") -> list[str]:
+        """Fichiers du workspace, en chemins relatifs POSIX (« a/b.md »).
+
+        POSIX et non str() : sur Windows str() donnait « rapports\\RAPPORT.md »,
+        stocké tel quel dans files_created, puis collé dans l'URL
+        /api/projects/{id}/files/{chemin} par le dashboard — lien cassé.
+        """
         target = self._safe_path(directory)
         if not target.is_dir():
             return []
-        return [
-            str(p.relative_to(self._workspace))
-            for p in sorted(target.rglob("*"))
-            if p.is_file() and ".jarvis" not in str(p)
-        ]
+        files: list[str] = []
+        for p in sorted(target.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(self._workspace)
+            if _is_internal(rel):
+                continue
+            files.append(rel.as_posix())
+        return files
 
     def delete_file(self, path: str) -> str:
         target = self._safe_path(path)

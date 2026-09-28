@@ -301,24 +301,10 @@ async def websocket_chat(websocket: WebSocket) -> None:
             elif route is RouteEnum.PROJECT:
                 orchestrator = getattr(websocket.app.state, "orchestrator", None)
                 if orchestrator:
-
-                    async def _run_project(
-                        msg: str = message, _orch: object = orchestrator
-                    ) -> None:
-                        try:
-                            await _orch.create_and_run(msg)
-                        except Exception as exc:
-                            collector.error("JRV-WS-001", "JRV-WS-001", cause=exc)
-                            logger.error("Project creation failed", error=str(exc))
-                            proactive.broadcast_event(
-                                {
-                                    "type": "notification",
-                                    "content": f"Erreur création projet : {exc}",
-                                }
-                            )
-
-                    asyncio.create_task(_run_project(), name=f"project-{str(session.id)[:8]}")
-                    logger.info("Project task launched", session_id=str(session.id))
+                    # Point d'entrée unique : les échecs avant création (planificateur
+                    # en panne, plan refusé) sont annoncés dans la conversation.
+                    orchestrator.launch_in_background(message, origin=f"ws-{str(session.id)[:8]}")
+                    logger.info(f"Mission lancée depuis le chat ({str(session.id)[:8]})")
 
             # ── mémoire post-done, hors chemin critique ───────────────────────
             # sleep(2) laisse la connexion HTTP principale se libérer avant que

@@ -663,6 +663,10 @@
         showChannel(data.text);
         if (_ctrlState.chat) loadChatWidget();
       }
+      // Les éléments TEXTE de la file proactive arrivent emballés en
+      // `notification` (websocket.py, _push_proactive). Aucune page ne les
+      // affichait : tout ce qui passait par ce type partait dans le vide.
+      if (data.type === "notification" && data.content) showChannel(String(data.content));
 
       // ── View routing ──────────────────────────────────────────────
       if (data.type === "reload_views") {
