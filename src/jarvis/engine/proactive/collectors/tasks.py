@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from jarvis.engine.proactive.collectors.base import CollectorBase
+from jarvis.engine.proactive.collectors.base import CollectorBase, SourceUnavailable
 from jarvis.engine.proactive.schemas import ContextItem, ItemType, Priority
 from jarvis.kernel.contracts import NotionReadTool
 
@@ -25,7 +25,9 @@ class TaskCollector(CollectorBase):
     async def _collect(self) -> list[ContextItem]:
         result = await self._notion_tool.execute()
 
-        if result.is_error or not result.content:
+        if result.is_error:
+            raise SourceUnavailable(result.content or "tâches illisibles")
+        if not result.content:
             return []
 
         items = []

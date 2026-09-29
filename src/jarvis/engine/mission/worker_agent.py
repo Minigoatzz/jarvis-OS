@@ -240,6 +240,18 @@ _WORKER_TOOLS: list[dict] = [
 ]
 
 
+def _describe_action(name: str, inputs: dict) -> str:
+    """L'action en clair, telle que l'utilisateur doit la juger avant de répondre."""
+    path = str(inputs.get("path", ""))
+    if name == "delete_file":
+        return f"supprimer {path}"
+    if name == "write_file":
+        return f"écrire {path}"
+    if name == "execute_cli":
+        return f"exécuter « {str(inputs.get('command', ''))[:160]} »"
+    return f"{name} {json.dumps(inputs, ensure_ascii=False)[:160]}"
+
+
 class WorkerAgent:
     def __init__(
         self,
@@ -276,6 +288,13 @@ class WorkerAgent:
         # Cause d'un échec qui ne tient à aucune étape (exception, étape restée
         # PENDING) — sans elle l'annonce de fin dirait « échouée » sans raison.
         self._failure_reason: str | None = None
+        # Un « non » de l'utilisateur — ou une demande restée sans réponse — est
+        # une DÉCISION, pas une erreur à contourner. Dès qu'il tombe, la mission
+        # s'arrête : plus d'outil, plus de recette, plus de correction. Avant, le
+        # refus revenait au modèle comme un simple message d'outil : l'étape se
+        # marquait ✓, la recette refusait, et l'étape de correction reposait la
+        # même question (proj_53189a : trois demandes pour une seule suppression).
+        self._declined: str | None = None
         # PHASE 1 — governance et verifier (injection ou construction tardive).
         self._governance = governance
         self._verifier = verifier
@@ -368,6 +387,12 @@ class WorkerAgent:
                     project.status = ProjectStatus.KILLED
                     break
                 await self._execute_step(step)
+                if self._declined:
+                    project.status = ProjectStatus.FAILED
+                    project.completed_at = datetime.now()
+                    self._failure_reason = self._declined
+                    await self._log("error", f"Mission arrêtée : {self._declined}")
+                    break
                 if step.status == StepStatus.FAILED:
                     project.status = ProjectStatus.FAILED
                     await self._log("error", f"Étape échouée : {step.title}")
@@ -403,8 +428,10 @@ class WorkerAgent:
                 if not verdict.accepted:
                     project.status = ProjectStatus.FAILED
                     manques = "; ".join(verdict.missing[:3])
-                    self._failure_reason = f"recette refusée — {verdict.reason}" + (
-                        f" ({manques})" if manques else ""
+                    # Un refus pendant la correction est la vraie cause : la dire.
+                    self._failure_reason = self._declined or (
+                        f"recette refusée — {verdict.reason}"
+                        + (f" ({manques})" if manques else "")
                     )
                     return
                 project.status = ProjectStatus.DONE
@@ -517,16 +544,18 @@ class WorkerAgent:
             self._push_update()
             return
 
-        # Approbation : par gate (APPROVAL/DRY_RUN) OU par flag legacy requires_approval (Q1=a).
-        gate_wants_approval = gate_decision in (GateDecision.APPROVAL, GateDecision.DRY_RUN)
-        if gate_wants_approval or step.requires_approval:
+        # Approbation d'étape : par le gate seul (niveau d'accès de l'étape).
+        # Le drapeau `requires_approval` du plan n'est plus suivi. C'était une
+        # supposition du planificateur, doublée par la vraie demande, faite au
+        # moment de l'action précise (_gate_tool) : une suppression te demandait
+        # ton accord DEUX fois, et le premier « oui » ne décidait de rien.
+        if gate_decision in (GateDecision.APPROVAL, GateDecision.DRY_RUN):
             step.status = StepStatus.WAITING_APPROVAL
             self._store.save_project(self._project)
             self._push_update()
-            reason = "Gate composite" if gate_wants_approval else "plan : requires_approval"
             await self._log(
                 "approval",
-                f"Approbation requise ({reason}) : {step.title}",
+                f"Approbation requise (niveau d'accès) : {step.title}",
                 step_id=step.id,
             )
 
@@ -542,6 +571,7 @@ class WorkerAgent:
                         "Aucune réponse à la demande d'approbation — "
                         "elle a expiré sans décision."
                     )
+                    self._declined = f"demande restée sans réponse — « {step.title} »"
                     await self._log(
                         "warning",
                         f"Approbation sans réponse : {step.title}",
@@ -549,6 +579,7 @@ class WorkerAgent:
                     )
                 else:
                     step.output = "Refusée par l'utilisateur."
+                    self._declined = f"tu as refusé l'étape « {step.title} »"
                     await self._log("info", f"Étape refusée : {step.title}", step_id=step.id)
                 self._store.save_project(self._project)
                 self._push_update()
@@ -618,6 +649,12 @@ class WorkerAgent:
                 step.status = StepStatus.FAILED
                 step.error = str(e)
                 await self._log("error", f"Erreur : {step.title} — {e}", step_id=step.id)
+                return
+
+            if self._declined:
+                step.status = StepStatus.FAILED
+                step.error = self._declined
+                await self._log("error", f"Étape arrêtée : {self._declined}", step_id=step.id)
                 return
 
             check = self._verifier.check_step() if self._verifier else None
@@ -724,6 +761,11 @@ class WorkerAgent:
     async def _tool_executor(self, name: str, inputs: dict) -> str:
         # PHASE 1 §9 / Q3=c — gate au niveau outil.
         # Chaque tool a son AccessLevel et sa catégorie ; refusé/approbation → court-circuit.
+        if self._declined:
+            return (
+                f"ARRÊT : {self._declined}. La mission s'arrête : n'appelle plus "
+                f"aucun outil et termine l'étape en une phrase."
+            )
         refusal = await self._gate_tool(name, inputs)
         if refusal is not None:
             return refusal
@@ -957,29 +999,31 @@ class WorkerAgent:
                 f"ACCÈS REFUSÉ : action '{name}' (cat. {cat}, niveau {int(al)}) "
                 f"bloquée par configuration utilisateur (catégorie NEVER ou budget hard_stop)."
             )
-        # APPROVAL ou DRY_RUN → demander à l'humain
+        # APPROVAL ou DRY_RUN → demander à l'humain, en clair : « Supprimer
+        # notes2.txt », pas « Outil 'delete_file' (cat. file_delete, niveau 1) ».
+        action = _describe_action(name, inputs)
         approval_id = f"tool-{uuid.uuid4().hex[:6]}"
         decision = await self._approval_cb(
-            self._project.id,
-            approval_id,
-            f"Outil '{name}' (cat. {cat}, niveau {int(al)}) requiert votre approbation",
+            self._project.id, approval_id, f"{action[:1].upper()}{action[1:]} — autoriser ?"
         )
-        if decision is not True:
-            if decision is None:
-                await self._log(
-                    "warning",
-                    f"Tool {name} : approbation sans réponse (demande expirée)",
-                    data={"category": cat},
-                )
-                return (
-                    f"ACCÈS REFUSÉ : aucune réponse à la demande d'approbation "
-                    f"pour '{name}' — elle a expiré sans décision."
-                )
+        if decision is True:
+            return None
+        if decision is None:
+            self._declined = f"demande restée sans réponse — {action}"
+            await self._log(
+                "warning",
+                f"Tool {name} : approbation sans réponse (demande expirée)",
+                data={"category": cat},
+            )
+        else:
+            self._declined = f"tu as refusé : {action}"
             await self._log(
                 "warning", f"Tool {name} non approuvé par l'utilisateur", data={"category": cat}
             )
-            return f"ACCÈS REFUSÉ : approbation utilisateur refusée pour '{name}'."
-        return None
+        return (
+            f"REFUS DE L'UTILISATEUR ({action}). Décision définitive : ne redemande pas, "
+            f"ne contourne pas. Termine l'étape en une phrase."
+        )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

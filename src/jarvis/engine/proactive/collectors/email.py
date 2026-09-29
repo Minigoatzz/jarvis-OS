@@ -17,9 +17,8 @@ import httpx
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from loguru import logger
 
-from jarvis.engine.proactive.collectors.base import CollectorBase
+from jarvis.engine.proactive.collectors.base import CollectorBase, SourceUnavailable
 from jarvis.engine.proactive.schemas import ContextItem, ItemType, Priority
 from jarvis.kernel.connectivity import is_offline_mode
 from jarvis.kernel.error_collector import collector  # jrv: autofix
@@ -95,8 +94,7 @@ class EmailCollector(CollectorBase):
 
     async def _collect(self) -> list[ContextItem]:
         if is_offline_mode():
-            logger.debug("EmailCollector ignoré — mode local")
-            return []
+            raise SourceUnavailable("mode local")
 
         creds_path = Path(settings.google_credentials_path)
         token_path = Path(settings.google_token_path).parent / "google_gmail_token.json"
@@ -105,8 +103,7 @@ class EmailCollector(CollectorBase):
             creds = await asyncio.to_thread(_load_gmail_creds, creds_path, token_path)
         except FileNotFoundError as e:
             collector.warning("JRV-PRO-001", "JRV-PRO-001", cause=e)
-            logger.warning(f"EmailCollector: {e}")
-            return []
+            raise SourceUnavailable(str(e)) from e
 
         return await self._fetch_messages(creds.token)
 

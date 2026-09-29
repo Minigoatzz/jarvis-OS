@@ -67,6 +67,19 @@ class WorldState:
         return "\n\n".join(sections)
 
 
+def _unknown(what: str, error: str | None) -> str:
+    """Résumé d'une source NON LUE — jamais confondu avec une source vide.
+
+    Sans credentials Google, le collecteur d'agenda rendait [] et le résumé
+    disait « Agenda libre dans les 48h » : le modèle en tirait une initiative
+    « Agenda libre disponible » sur un agenda que personne n'avait lu.
+    """
+    if not error:
+        return ""
+    reason = " ".join(error.split())[:100]
+    return f"{what} : INCONNU — source non lue ({reason}). N'en tire aucune conclusion."
+
+
 class ContextBuilder:
     def __init__(
         self,
@@ -99,14 +112,22 @@ class ContextBuilder:
                 logger.error(f"Collector {collector.name} error: {result}")
             else:
                 all_items.extend(result)
+                if collector.last_error:
+                    errors[collector.name] = collector.last_error
 
         collection = CollectionResult(items=all_items, collected_at=datetime.now(), errors=errors)
 
         state = WorldState(collected_at=datetime.now(), collection=collection)
 
-        state.email_summary = self._summarize_emails(collection.by_type(ItemType.EMAIL))
-        state.calendar_summary = self._summarize_calendar(collection.by_type(ItemType.EVENT))
-        state.tasks_summary = self._summarize_tasks(collection.by_type(ItemType.TASK))
+        state.email_summary = _unknown("Emails", errors.get("email")) or self._summarize_emails(
+            collection.by_type(ItemType.EMAIL)
+        )
+        state.calendar_summary = _unknown("Agenda", errors.get("calendar")) or (
+            self._summarize_calendar(collection.by_type(ItemType.EVENT))
+        )
+        state.tasks_summary = _unknown("Tâches", errors.get("tasks")) or self._summarize_tasks(
+            collection.by_type(ItemType.TASK)
+        )
         weather_items = [i for i in collection.by_type(ItemType.NEWS) if i.source == "weather"]
         news_items = [i for i in collection.by_type(ItemType.NEWS) if i.source != "weather"]
         state.weather_summary = self._summarize_weather(weather_items)

@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from jarvis.engine.mission.governance import GateDecision
 from jarvis.engine.mission.schemas import StepStatus
 
 if TYPE_CHECKING:
@@ -62,7 +63,6 @@ def _step() -> MagicMock:
     step.id = "s1"
     step.title = "Obtenir la clé d'API"
     step.description = "Obtenir la clé d'API"
-    step.requires_approval = True
     step.status = None
     step.output = None
     return step
@@ -70,24 +70,29 @@ def _step() -> MagicMock:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("decision", "expected_fragment", "forbidden_fragment"),
+    ("decision", "expected_fragment", "forbidden_fragment", "stop_reason"),
     [
-        (None, "Aucune réponse", "Refusée par l'utilisateur"),
-        (False, "Refusée par l'utilisateur", "Aucune réponse"),
+        (None, "Aucune réponse", "Refusée par l'utilisateur", "sans réponse"),
+        (False, "Refusée par l'utilisateur", "Aucune réponse", "tu as refusé"),
     ],
 )
 async def test_no_answer_is_not_recorded_as_a_refusal(
-    decision: bool | None, expected_fragment: str, forbidden_fragment: str
+    decision: bool | None, expected_fragment: str, forbidden_fragment: str, stop_reason: str
 ) -> None:
     worker = _make_worker(decision)
     step = _step()
 
-    with patch.object(worker, "_gate_step", AsyncMock(return_value=None)):
+    # L'approbation d'étape vient du gate (niveau d'accès) — le drapeau
+    # `requires_approval` du plan n'est plus suivi.
+    with patch.object(worker, "_gate_step", AsyncMock(return_value=GateDecision.APPROVAL)):
         await worker._execute_step(step)
 
     assert step.status == StepStatus.SKIPPED
     assert expected_fragment in step.output
     assert forbidden_fragment not in step.output
+    # Dans les deux cas, la mission s'arrête — avec la vraie raison.
+    assert worker._declined is not None
+    assert stop_reason in worker._declined
 
 
 @pytest.mark.asyncio

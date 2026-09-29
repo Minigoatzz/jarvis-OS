@@ -174,6 +174,7 @@ def test_un_refus_definitif_dit_au_modele_de_ne_pas_reessayer() -> None:
     class _Faux:
         _cli_tool = _CLI()
         _blockers: list[str] = []
+        _declined = None
 
         async def _gate_tool(self, name: str, inputs: dict) -> None:
             return None

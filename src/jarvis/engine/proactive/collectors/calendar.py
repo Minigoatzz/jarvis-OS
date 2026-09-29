@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from jarvis.engine.proactive.collectors.base import CollectorBase
+from jarvis.engine.proactive.collectors.base import CollectorBase, SourceUnavailable
 from jarvis.engine.proactive.schemas import ContextItem, ItemType, Priority
 from jarvis.kernel.contracts import CalendarReadTool
 
@@ -26,7 +26,7 @@ class CalendarCollector(CollectorBase):
         result = await self._calendar_tool.execute(days_ahead=2)
 
         if result.is_error:
-            return []
+            raise SourceUnavailable(result.content or "agenda illisible")
 
         items = []
         now = datetime.now()

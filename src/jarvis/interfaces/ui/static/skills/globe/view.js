@@ -27,7 +27,14 @@
       const s = document.createElement('script');
       s.src = src;
       s.onload = resolve;
-      s.onerror = reject;
+      // onerror rend un Event, pas une Error : son .message valait undefined et
+      // la vue affichait « undefined » au milieu de l'écran. Et la balise ratée
+      // restait dans la page : le test ci-dessus la trouvait au prochain essai,
+      // résolvait sans Mapbox, et la carte ne pouvait plus jamais se charger.
+      s.onerror = () => {
+        s.remove();
+        reject(new Error('Carte indisponible : Mapbox n\'a pas pu être chargé (connexion internet ?)'));
+      };
       document.head.appendChild(s);
     });
   }
@@ -231,6 +238,7 @@
       }
 
       try {
+        container.replaceChildren(); // retire le message d'un échec précédent
         await loadMapbox();
         const token = await fetchToken();
         mapboxgl.accessToken = token;
@@ -283,7 +291,15 @@
         map.on('touchend', resume);
 
       } catch (err) {
-        container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--fg-1,#e8e8e8);font-family:monospace;font-size:13px;">${err.message}</div>`;
+        // textContent : le message peut venir du réseau, jamais de HTML.
+        const msg = document.createElement('div');
+        msg.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:var(--fg-1,#e8e8e8);font-family:monospace;font-size:13px;';
+        msg.textContent = (err && err.message) || 'Carte indisponible.';
+        container.replaceChildren(msg);
+        map = null;
+        // Refermer la vue : sinon elle restait « visible » et chaque show()
+        // suivant sortait aussitôt (« Already visible ») sans jamais réessayer.
+        setTimeout(() => { if (!map) window.Jarvis.views.deactivate(VIEW_ID); }, 4000);
       }
     },
 

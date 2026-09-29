@@ -48,7 +48,6 @@ Champs :
 - success_criterion : en une phrase, ce que « étape terminée » veut dire.
 - access_level : 0 lecture seule · 1 écrire dans le workspace (défaut) · 2 exécuter du
   code · 3 réseau · 4 installer un paquet (approbation humaine).
-- requires_approval : true seulement pour une action irréversible hors du workspace.
 
 Réponds UNIQUEMENT avec ce JSON, sans markdown :
 {
@@ -60,8 +59,7 @@ Réponds UNIQUEMENT avec ce JSON, sans markdown :
       "title": "Titre de l'étape (< 50 caractères)",
       "description": "Ce que l'agent doit faire (1 à 3 phrases)",
       "success_criterion": "Ce que « terminé » veut dire",
-      "access_level": 1,
-      "requires_approval": false
+      "access_level": 1
     }
   ]
 }
