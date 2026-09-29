@@ -22,7 +22,6 @@ from jarvis.engine.mission.schemas import (
     Project,
     ProjectStatus,
     StepStatus,
-    validate_step,
 )
 from jarvis.engine.mission.worker_agent import WorkerAgent
 from jarvis.kernel.contracts import LLMProvider
@@ -33,17 +32,6 @@ from jarvis.kernel.subprocess_compat import describe_exception
 # Délai de réponse à une demande d'approbation d'étape. Envoyé tel quel à la page
 # (`timeout_s`) pour qu'elle affiche le vrai temps restant : une seule source.
 _APPROVAL_TIMEOUT_S = 600
-
-
-class PlanRejectedError(ValueError):
-    """Plan refusé à la validation (étape sans critère de succès vérifiable).
-
-    Type distinct parce qu'un échec du PLANIFICATEUR lui-même lève aussi
-    parfois ValueError — json.JSONDecodeError en est une sous-classe. Sans ce
-    type, launch_in_background() ne pourrait pas distinguer « plan refusé,
-    déjà annoncé » de « planificateur en panne, à annoncer », et se tairait
-    sur le second.
-    """
 
 
 class ProjectOrchestrator:
@@ -137,9 +125,6 @@ class ProjectOrchestrator:
         async def _run() -> None:
             try:
                 await self.create_and_run(mission)
-            except PlanRejectedError:
-                # jrv: pas de code — déjà collecté et annoncé par create_and_run
-                pass
             except Exception as exc:
                 collector.error("JRV-MSN-001", "JRV-MSN-001", cause=exc)
                 detail = describe_exception(exc)
@@ -153,36 +138,12 @@ class ProjectOrchestrator:
     async def create_and_run(self, mission: str, timeout_minutes: int = 30) -> Project:
         """Crée le projet (appel LLM de planification) et lance le worker en background.
 
-        PHASE 1 §4.2 — refuse de lancer un plan dont un step n'a pas de success_criterion.
+        Plus de rejet de plan pour un critère manquant : les critères par étape ne
+        conditionnent plus rien, c'est la recette de fin qui juge la demande. Un plan
+        inexploitable (aucune étape, JSON illisible) lève PlanError au normaliseur,
+        et launch_in_background l'annonce.
         """
         project = await self._manager.create_project(mission, timeout_minutes)
-
-        # Validation du plan : chaque step DOIT porter un success_criterion vérifiable.
-        try:
-            for step in project.steps:
-                validate_step(step)
-        except ValueError as exc:
-            collector.error("JRV-MSN-001", "JRV-MSN-001", cause=exc)
-            project.status = ProjectStatus.FAILED
-            self._store.save_project(project)
-            logger.error(
-                "Plan refusé — step sans success_criterion",
-                project_id=project.id,
-                error=str(exc),
-            )
-            self._broadcast(
-                {
-                    "type": "project_plan_invalid",
-                    "project_id": project.id,
-                    "error": str(exc),
-                }
-            )
-            # Sans ça, un plan refusé laissait la conversation sur « Mission
-            # lancée » pour toujours : l'utilisateur attendait une mission morte.
-            self._broadcast(
-                mission_announcements.chat_message(mission_announcements.plan_invalid(str(exc)))
-            )
-            raise PlanRejectedError(str(exc)) from exc
 
         worker = WorkerAgent(
             project=project,

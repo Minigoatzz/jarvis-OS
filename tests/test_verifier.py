@@ -1,410 +1,184 @@
-# Copyright (C) 2026 Barthélemy Houot
+# Copyright (C) 2026 Barthelemy Houot
 # This file is part of Jarvis OS, licensed under the GNU AGPL-3.0-or-later.
 # See the LICENSE file or <https://www.gnu.org/licenses/agpl-3.0.html>.
 
-"""Tests du verifier 3-couches (CDC §4.3).
+"""Verifier : un controle objectif par etape, une recette sur preuves a la fin.
 
-Couvre les cas critiques :
-- Couche 1 (structurelle) bloque avant d'appeler la couche 2 ou 3
-- Couche 2 (verification_command rc≠0) bloque avant d'appeler la couche 3
-- Couche 3 (LLM grader) — verdict false rejette
-- Couche 3 — verdict non parsable → verified=false (en cas de doute, on ne valide pas)
-- Couche 3 — erreur LLM → verified=false
-- Toutes les couches passent → verified=true
+Remplace la verification en trois couches par etape. Voir le module pour
+l'historique ; ici, chaque decision de conception a son test.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
-import pytest
-
 from jarvis.engine.mission.quality_checker import QualityChecker
-from jarvis.engine.mission.schemas import Project, Step
 from jarvis.engine.mission.verifier import Verifier
-from jarvis.providers.llm.base import LLMProvider
-
-# ── Fakes ──────────────────────────────────────────────────────────────────────
+from jarvis.kernel.schemas import LogEntry, Project, Step, StepStatus
 
 
-class _FakeLLM(LLMProvider):
-    """LLM contrôlable : on injecte la réponse brute à renvoyer."""
+class _Juge:
+    """LLM factice : rend un verdict donne et garde le dernier prompt recu."""
 
-    def __init__(self, raw: str | None = None, raise_exc: Exception | None = None) -> None:
-        self.raw = raw
-        self.raise_exc = raise_exc
-        self.calls = 0
-        self.last_prompt: str | None = None
+    def __init__(self, reponse: object = None, erreur: Exception | None = None) -> None:
+        self._reponse = reponse
+        self._erreur = erreur
+        self.prompt = ""
+        self.appels = 0
 
-    async def complete(
-        self,
-        messages: list[dict],
-        system: str,
-        tools: list[dict] | None = None,
-        stream: bool = False,
-        context: str = "",
-    ) -> str | AsyncIterator[str]:
-        self.calls += 1
-        self.last_prompt = messages[-1]["content"] if messages else None
-        if self.raise_exc is not None:
-            raise self.raise_exc
-        assert self.raw is not None
-        return self.raw
+    async def complete(self, messages: list[dict], system: str, **_: object) -> object:
+        self.appels += 1
+        self.prompt = messages[-1]["content"]
+        if self._erreur is not None:
+            raise self._erreur
+        return self._reponse if isinstance(self._reponse, str) else json.dumps(self._reponse)
 
     async def health_check(self) -> bool:
         return True
 
 
-async def _fake_cli_success(command: str, timeout: int) -> dict:  # noqa: ARG001, ASYNC109
-    return {"success": True, "stdout": "ok", "stderr": "", "returncode": 0}
+def _verifier(ws: Path, juge: _Juge | None = None) -> Verifier:
+    return Verifier(QualityChecker(str(ws)), juge or _Juge())  # type: ignore[arg-type]
 
 
-async def _fake_cli_failure(command: str, timeout: int) -> dict:  # noqa: ARG001, ASYNC109
-    return {"success": False, "stdout": "", "stderr": "test failed", "returncode": 1}
+def _projet(ws: Path, mission: str = "m") -> Project:
+    etape = Step("s1", "Écrire", "d", status=StepStatus.DONE, output="fait")
+    return Project(id="p", title="t", mission=mission, steps=[etape], workspace_path=str(ws))
 
 
-async def _fake_cli_raise(command: str, timeout: int) -> dict:  # noqa: ARG001, ASYNC109
-    raise RuntimeError("docker not running")
+def _journal(*messages: str, **data: object) -> list[LogEntry]:
+    return [LogEntry(datetime.now(), "tool", m, data=data or None) for m in messages]
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── 1. Par etape : seulement l'objectif ─────────────────────────────────────
 
 
-def _make_project_step(
-    tmp_path: Path,
-    criterion: str = "Le fichier index.html existe.",
-    verification_command: str | None = None,
-    output: str = "Fichier créé.",
-) -> tuple[Project, Step, list[str]]:
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    project = Project(
-        id="proj_test",
-        title="Test",
-        mission="Mission de test",
-        workspace_path=str(workspace),
+def test_une_etape_sans_defaut_passe_meme_sans_rien_changer(tmp_path: Path) -> None:
+    """proj_b2ca0d : l'etape etait recalee pour « Aucun fichier nouveau ou modifie »
+    alors que la date etait deja dans le fichier."""
+    (tmp_path / "bonjour.txt").write_text("2026-09-23\n", encoding="utf-8")
+    assert _verifier(tmp_path).check_step().verified
+
+
+def test_un_fichier_vide_est_un_defaut(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("", encoding="utf-8")
+    verdict = _verifier(tmp_path).check_step()
+    assert not verdict.verified
+    assert any("vide" in i for i in verdict.issues)
+
+
+def test_un_init_py_vide_n_est_pas_un_defaut(tmp_path: Path) -> None:
+    """Sinon toute mission qui cree un paquet Python echoue."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    assert _verifier(tmp_path).check_step().verified
+
+
+def test_un_fichier_existant_reecrit_avec_une_erreur_est_vu(tmp_path: Path) -> None:
+    """L'ancien controle ne regardait que les fichiers NOUVEAUX."""
+    script = tmp_path / "script.py"
+    script.write_text("print(1)\n", encoding="utf-8")
+    verifier = _verifier(tmp_path)
+    assert verifier.check_step().verified
+    script.write_text("print(\n", encoding="utf-8")  # meme chemin, contenu casse
+    assert not verifier.check_step().verified
+
+
+def test_les_references_html_ne_bloquent_pas_une_etape(tmp_path: Path) -> None:
+    """index.html est ecrit AVANT style.css dans un plan normal."""
+    (tmp_path / "index.html").write_text(
+        '<link rel="stylesheet" href="style.css">', encoding="utf-8"
     )
-    step = Step(
-        id="s1",
-        title="Step",
-        description="Description",
-        success_criterion=criterion,
-        verification_command=verification_command,
-        output=output,
-    )
-    files_before: list[str] = []
-    return project, step, files_before
+    assert _verifier(tmp_path).check_step().verified
 
 
-def _verdict_json(verified: bool, issues: list[str] | None = None, notes: str = "") -> str:
-    return json.dumps({"verified": verified, "issues": issues or [], "notes": notes})
+def test_l_etape_n_appelle_jamais_le_llm(tmp_path: Path) -> None:
+    juge = _Juge()
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    _verifier(tmp_path, juge).check_step()
+    assert juge.appels == 0
 
 
-# ── 1. Couche 1 — structurelle bloque avant les couches suivantes ─────────────
+# ── 2. La recette voit TOUTES les preuves ───────────────────────────────────
 
 
-async def test_couche1_fichier_vide_bloque_avant_llm(tmp_path: Path) -> None:
-    project, step, files_before = _make_project_step(tmp_path, verification_command="true")
-    # On crée un fichier vide pour faire échouer la couche 1
-    (Path(project.workspace_path) / "vide.py").write_text("")
+def test_la_recette_voit_le_contenu_reel_des_fichiers(tmp_path: Path) -> None:
+    """proj_d57ef2 : le worker avait ecrit « $(date +%Y-%m-%d) » litteralement.
+    Le juge doit voir ce contenu pour pouvoir le refuser."""
+    (tmp_path / "bonjour.txt").write_text("$(date +%Y-%m-%d)", encoding="utf-8")
+    juge = _Juge({"accepted": False, "missing": ["date"], "reason": "r"})
+    asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), []))
+    assert "$(date +%Y-%m-%d)" in juge.prompt
 
-    llm = _FakeLLM(raw=_verdict_json(True))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm, cli_executor=_fake_cli_success)
 
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "structural"
-    assert llm.calls == 0  # LLM JAMAIS appelé
-    assert any("vide" in i.lower() for i in result.issues)
-
+def test_la_recette_voit_une_suppression(tmp_path: Path) -> None:
+    """proj_e7b565 : l'ancien juge ne voyait que les fichiers nouveaux, une
+    suppression reussie etait indiscernable d'un oubli."""
+    (tmp_path / "notes1.txt").write_text("a", encoding="utf-8")
+    juge = _Juge({"accepted": True, "missing": [], "reason": "ok"})
+    journal = _journal("delete_file: notes2.txt")
+    asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), journal))
+    assert "delete_file: notes2.txt" in juge.prompt
+    assert "=== notes2.txt" not in juge.prompt
 
-async def test_couche1_python_invalide_bloque(tmp_path: Path) -> None:
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "bug.py").write_text("def foo(:\n    pass")
 
-    llm = _FakeLLM(raw=_verdict_json(True))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
+def test_la_recette_voit_la_sortie_d_une_execution(tmp_path: Path) -> None:
+    (tmp_path / "script.py").write_text("print([2, 3, 5])\n", encoding="utf-8")
+    juge = _Juge({"accepted": True, "missing": [], "reason": "ok"})
+    journal = _journal("execute_cli: python3 script.py", returncode=0, output="[2, 3, 5]")
+    asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), journal))
+    assert "code 0" in juge.prompt and "[2, 3, 5]" in juge.prompt
 
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "structural"
-    assert llm.calls == 0
 
+def test_la_recette_juge_la_demande_d_origine(tmp_path: Path) -> None:
+    juge = _Juge({"accepted": True, "missing": [], "reason": "ok"})
+    projet = _projet(tmp_path, mission="calcule les 100 premiers nombres premiers")
+    asyncio.run(_verifier(tmp_path, juge).accept(projet, []))
+    assert "calcule les 100 premiers nombres premiers" in juge.prompt
+    assert "Sans preuve d'un manque, accepte" in juge.prompt
 
-# ── 2. Couche 2 — verification_command rc≠0 bloque avant la couche 3 ──────────
 
+# ── 3. Le verdict ───────────────────────────────────────────────────────────
 
-async def test_couche2_command_rc_non_nul_bloque_avant_llm(tmp_path: Path) -> None:
-    project, step, files_before = _make_project_step(
-        tmp_path,
-        verification_command="pytest -x",  # va échouer (fake renvoie failure)
-    )
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
 
-    llm = _FakeLLM(raw=_verdict_json(True))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm, cli_executor=_fake_cli_failure)
+def test_un_verdict_positif_est_accepte(tmp_path: Path) -> None:
+    juge = _Juge({"accepted": True, "missing": [], "reason": "demande satisfaite"})
+    verdict = asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), []))
+    assert verdict.accepted and verdict.judged
 
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "deterministic"
-    assert llm.calls == 0
-    # Le message nomme désormais la commande en plus du code de retour : le
-    # worker ne pouvait pas corriger un échec dont il ignorait la commande.
-    assert any("pytest -x" in i and "code de retour 1" in i for i in result.issues)
 
+def test_un_refus_porte_ses_manques(tmp_path: Path) -> None:
+    juge = _Juge({"accepted": False, "missing": ["semaine.md absent"], "reason": "incomplet"})
+    verdict = asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), []))
+    assert not verdict.accepted and verdict.judged
+    assert verdict.missing == ["semaine.md absent"]
 
-async def test_couche2_command_exception_bloque(tmp_path: Path) -> None:
-    project, step, files_before = _make_project_step(
-        tmp_path, verification_command="test something"
-    )
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
 
-    llm = _FakeLLM(raw=_verdict_json(True))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm, cli_executor=_fake_cli_raise)
+def test_seul_le_booleen_true_vaut_acceptation(tmp_path: Path) -> None:
+    for valeur in ("true", "oui", 1, None):
+        juge = _Juge({"accepted": valeur, "missing": [], "reason": "r"})
+        verdict = asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), []))
+        assert not verdict.accepted, valeur
 
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "deterministic"
-    assert llm.calls == 0
 
+def test_une_cloture_markdown_autour_du_json_est_toleree(tmp_path: Path) -> None:
+    juge = _Juge('```json\n{"accepted": true, "missing": [], "reason": "ok"}\n```')
+    assert asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), [])).accepted
 
-async def test_couche2_absente_passe_directement_a_la_couche3(tmp_path: Path) -> None:
-    """Sans verification_command, la couche 2 est sautée."""
-    project, step, files_before = _make_project_step(tmp_path, verification_command=None)
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
 
-    llm = _FakeLLM(raw=_verdict_json(True))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm, cli_executor=_fake_cli_failure)  # serait failure
+def test_un_juge_en_panne_n_est_pas_un_refus_argumente(tmp_path: Path) -> None:
+    """Rien de precis a corriger : pas de ronde de correction (judged=False)."""
+    juge = _Juge(erreur=ConnectionError("Ollama injoignable"))
+    verdict = asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), []))
+    assert not verdict.accepted and not verdict.judged
+    assert "Ollama injoignable" in verdict.reason
 
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is True
-    assert result.layer == "semantic"
-    assert llm.calls == 1
 
-
-# ── 3. Couche 3 — verdict false rejette ───────────────────────────────────────
-
-
-async def test_couche3_artefact_compile_mais_ne_repond_pas_au_critere(
-    tmp_path: Path,
-) -> None:
-    """Cas central du §4.3 : un livrable plausible mais faux est rejeté par la couche sémantique."""
-    project, step, files_before = _make_project_step(
-        tmp_path,
-        criterion="Le fichier index.html liste 3 articles.",
-    )
-    # Fichier qui compile mais ne répond PAS au critère
-    (Path(project.workspace_path) / "index.html").write_text("<html><body></body></html>")
-
-    llm = _FakeLLM(
-        raw=_verdict_json(
-            False,
-            issues=["L'index.html est vide, aucun article listé."],
-            notes="Le critère exige 3 articles, je n'en trouve 0.",
-        ),
-    )
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "semantic"
-    assert llm.calls == 1
-    assert "3 articles" in result.notes
-
-
-# ── 4. Couche 3 — verdict non parsable → verified=false ──────────────────────
-
-
-async def test_couche3_verdict_non_parsable_donne_false(tmp_path: Path) -> None:
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
-
-    llm = _FakeLLM(raw="Désolé, je ne peux pas évaluer cette tâche.")  # pas du JSON
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "semantic"
-    assert any("non parsable" in i for i in result.issues)
-
-
-async def test_couche3_json_avec_fences_markdown(tmp_path: Path) -> None:
-    """Le verifier tolère les ```json ... ``` autour du verdict."""
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
-
-    llm = _FakeLLM(raw="```json\n" + _verdict_json(True, notes="OK") + "\n```")
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is True
-
-
-async def test_couche3_json_avec_cles_manquantes_strict(tmp_path: Path) -> None:
-    """Si la clé 'verified' n'est pas explicitement True (bool), verified=false."""
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
-
-    # verified="True" (string), pas un bool
-    llm = _FakeLLM(raw='{"verified": "True", "issues": [], "notes": ""}')
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False  # strict : "True" str ≠ True bool
-
-
-async def test_couche3_json_array_non_dict(tmp_path: Path) -> None:
-    """Un JSON valide mais non-dict → verified=false."""
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
-
-    llm = _FakeLLM(raw='["verified", true]')
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-
-
-# ── 5. Couche 3 — erreur LLM → verified=false ────────────────────────────────
-
-
-async def test_couche3_llm_raise_donne_false(tmp_path: Path) -> None:
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
-
-    llm = _FakeLLM(raise_exc=RuntimeError("LLM timeout"))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "semantic"
-
-
-# ── 6. Toutes les couches passent → verified=true ─────────────────────────────
-
-
-async def test_toutes_couches_passent_verified_true(tmp_path: Path) -> None:
-    project, step, files_before = _make_project_step(
-        tmp_path,
-        verification_command="ls",
-    )
-    (Path(project.workspace_path) / "ok.py").write_text("x = 1\n")
-
-    llm = _FakeLLM(raw=_verdict_json(True, notes="Tout est en ordre."))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm, cli_executor=_fake_cli_success)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is True
-    # Depuis le 24/09 la couche 2 fait foi quand elle passe (sa docstring le
-    # disait déjà) : le juge LLM n'est plus consulté derrière elle. Il avait
-    # recalé une étape dont le critère était atteint (proj_b2ca0d, « Aucun
-    # fichier nouveau ou modifié » alors que le fichier contenait la date).
-    assert result.layer == "deterministic"
-    assert llm.calls == 0, "le juge ne doit pas pouvoir contredire un critère atteint"
-
-
-# ── 6bis. Régression — le prompt de couche 3 contient le CONTENU des fichiers ─
-
-
-async def test_couche3_prompt_contient_contenu_des_fichiers_nouveaux(
-    tmp_path: Path,
-) -> None:
-    """Le grader sémantique a besoin du contenu RÉEL des artefacts pour juger.
-
-    Régression : sans le contenu, le grader refuse à juste titre de se prononcer
-    car il ne voit que la liste de fichiers (cas observé sur la mission réelle).
-    """
-    project, step, files_before = _make_project_step(
-        tmp_path,
-        criterion="Le fichier index.html contient 3 articles d'astronomie.",
-    )
-    contenu = (
-        "<!DOCTYPE html><html><body>"
-        "<article><h2>Exoplanètes</h2><p>...</p></article>"
-        "<article><h2>Trous noirs</h2><p>...</p></article>"
-        "<article><h2>Pulsars</h2><p>...</p></article>"
-        "</body></html>"
-    )
-    (Path(project.workspace_path) / "index.html").write_text(contenu)
-
-    llm = _FakeLLM(raw=_verdict_json(True, notes="Trois articles trouvés."))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is True
-
-    # Le prompt doit inclure le contenu, pas juste le nom
-    assert llm.last_prompt is not None
-    assert "Exoplanètes" in llm.last_prompt
-    assert "Trous noirs" in llm.last_prompt
-    assert "Pulsars" in llm.last_prompt
-    assert "=== index.html" in llm.last_prompt
-
-
-async def test_couche3_prompt_tronque_au_dela_de_la_limite(tmp_path: Path) -> None:
-    """Si un fichier dépasse _MAX_CONTENT_CHARS, le prompt le tronque proprement."""
-    project, step, files_before = _make_project_step(tmp_path)
-    # Fichier de 20 000 chars (au-dessus de _MAX_CONTENT_CHARS = 6000)
-    enorme = "x" * 20000
-    (Path(project.workspace_path) / "huge.txt").write_text(enorme)
-
-    llm = _FakeLLM(raw=_verdict_json(True))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    await verifier.verify(project, step, files_before)
-    assert llm.last_prompt is not None
-    # Le prompt ne doit pas contenir les 20 000 chars
-    assert "tronqué" in llm.last_prompt
-    assert llm.last_prompt.count("x") < 8000  # marge pour le reste du prompt
-
-
-async def test_couche3_binaire_skip(tmp_path: Path) -> None:
-    """Les fichiers binaires (png, jpg) sont mentionnés mais leur contenu n'est pas lu."""
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "img.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
-
-    llm = _FakeLLM(raw=_verdict_json(True))
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm)
-
-    await verifier.verify(project, step, files_before)
-    assert llm.last_prompt is not None
-    assert "img.png" in llm.last_prompt
-    assert "binaire" in llm.last_prompt
-
-
-# ── 7. Garde-fou supplémentaire : la couche structurelle n'appelle JAMAIS le LLM
-
-
-@pytest.mark.parametrize(
-    "raw_response",
-    [_verdict_json(True), "garbage", ""],  # peu importe ce que le LLM aurait dit
-)
-async def test_couche1_court_circuit_complet(tmp_path: Path, raw_response: str) -> None:
-    project, step, files_before = _make_project_step(tmp_path)
-    (Path(project.workspace_path) / "vide.py").write_text("")  # déclenche couche 1
-
-    llm = _FakeLLM(raw=raw_response or "should not be called")
-    quality = QualityChecker(project.workspace_path)
-    verifier = Verifier(quality, llm, cli_executor=_fake_cli_success)
-
-    result = await verifier.verify(project, step, files_before)
-    assert result.verified is False
-    assert result.layer == "structural"
-    assert llm.calls == 0
+def test_une_reponse_illisible_a_une_seconde_chance(tmp_path: Path) -> None:
+    juge = _Juge("je pense que oui")
+    verdict = asyncio.run(_verifier(tmp_path, juge).accept(_projet(tmp_path), []))
+    assert juge.appels == 2
+    assert not verdict.accepted and not verdict.judged

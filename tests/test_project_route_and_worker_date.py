@@ -94,18 +94,27 @@ def test_the_written_context_actually_contains_a_real_date() -> None:
     assert re.fullmatch(r"Date du jour : \d{4}-\d{2}-\d{2}", rendered)
 
 
-def test_the_literal_string_the_worker_wrote_would_still_fail_verification() -> None:
-    """Garde-fou : si le modèle récidive, la vérif doit continuer à le refuser."""
-    from jarvis.engine.mission.native_checks import evaluate
-
+def test_the_literal_string_the_worker_wrote_is_shown_to_the_acceptance() -> None:
+    """Garde-fou proj_d57ef2 : le worker avait ecrit « $(date +%Y-%m-%d) » tel quel.
+    La recette de fin doit VOIR ce contenu pour pouvoir le refuser."""
+    import asyncio
+    import json
     import tempfile
 
-    with tempfile.TemporaryDirectory() as tmp:
-        ws = Path(tmp)
-        (ws / "bonjour.txt").write_text("$(date +%Y-%m-%d)", encoding="utf-8")
-        verdict = evaluate(r"grep -E '^\d{4}-\d{2}-\d{2}$' bonjour.txt", ws)
-        assert verdict is not None and not verdict.passed
+    from jarvis.engine.mission.quality_checker import QualityChecker
+    from jarvis.engine.mission.verifier import Verifier
+    from jarvis.kernel.schemas import Project
 
-        (ws / "bonjour.txt").write_text(f"{datetime.now():%Y-%m-%d}\n", encoding="utf-8")
-        ok = evaluate(r"grep -E '^\d{4}-\d{2}-\d{2}$' bonjour.txt", ws)
-        assert ok is not None and ok.passed
+    class _Juge:
+        prompt = ""
+
+        async def complete(self, messages: list, system: str, **_: object) -> str:
+            _Juge.prompt = messages[-1]["content"]
+            return json.dumps({"accepted": False, "missing": ["date"], "reason": "r"})
+
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "bonjour.txt").write_text("$(date +%Y-%m-%d)", encoding="utf-8")
+        projet = Project(id="p", title="t", mission="date du jour", workspace_path=tmp)
+        verifier = Verifier(QualityChecker(tmp), _Juge())  # type: ignore[arg-type]
+        asyncio.run(verifier.accept(projet, []))
+        assert "$(date +%Y-%m-%d)" in _Juge.prompt

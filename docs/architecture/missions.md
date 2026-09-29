@@ -28,13 +28,39 @@ message utilisateur
   ▼  engine/mission/orchestrator.py — create_and_run()
   │    project_manager.create_project()
   │       LLM planificateur ──► plan_normalizer (frontière LLM → moteur)
-  │    validate_step() sur chaque étape (critère de succès obligatoire)
   │    _start_worker()  — seul point de lancement (création, retry, reprise)
   │
   ▼  engine/mission/worker_agent.py — WorkerAgent.run()
-       _setup_environment() puis chaque étape : _execute_step() + Verifier
-       finally : sauvegarde, project_update, _announce_finished()
+       _setup_environment()
+       chaque étape : _execute_step() puis Verifier.check_step()
+                      (défaut OBJECTIF seulement : fichier vide, Python invalide)
+       fin          : _run_acceptance() → Verifier.accept()  — LA recette
+                      refus argumenté → 1 étape « Corriger d'après la recette » → recette
+       finally      : sauvegarde, project_update, _announce_finished()
 ```
+
+### Une seule porte : la recette
+
+Jusqu'au 29/09, chaque étape était une porte bloquante jugée en trois couches (structure,
+commande shell écrite par le planificateur, juge LLM). Mesuré sur toutes les missions :
+15 refus, dont 13 venus des deux dernières couches, et les deux missions mortes avaient
+un travail correct. La commande jugeait le texte du code, pas le but ; le juge ne voyait
+ni les fichiers modifiés ni les supprimés et devait « refuser dans le doute ». Et avec
+8 portes à 90 %, une mission réussit 43 % du temps.
+
+Aujourd'hui :
+- **Une étape est un progrès, pas un verdict.** Elle n'échoue que sur un défaut objectif,
+  vrai à tout moment de la mission.
+- **La recette juge la DEMANDE** d'origine, sur toutes les preuves : chaque fichier et son
+  contenu, et le journal des actions (écritures, suppressions, commandes avec code et
+  sortie). Elle doit citer ce qui manque pour refuser ; sans preuve de manque, elle accepte.
+- Un refus argumenté ouvre UNE correction ciblée, visible dans le dashboard. Un juge en
+  panne (erreur, réponse illisible) n'en ouvre pas : il n'y a rien de précis à corriger.
+
+Ce qui a été retiré pour y arriver : l'évaluateur de commandes shell (`native_checks.py`),
+le filtre à tautologies, les commandes de vérification par étape, les étapes de test et
+`RAPPORT.md` injectées d'office, le rejet de plan pour critère manquant, et les deux tiers
+du prompt du planificateur. 685 lignes de moins dans le moteur.
 
 ## 2. Qui décide qu'une demande devient une mission
 
@@ -55,11 +81,10 @@ Un élément `dict` est envoyé tel quel ; un élément **texte** est emballé e
 | Type | Émis par | Quand | Écouté par |
 |---|---|---|---|
 | `project_created` | orchestrator | plan validé, worker lancé | dashboard.js |
-| `project_plan_invalid` | orchestrator | plan refusé (étape sans critère) | dashboard.js |
 | `project_update` | worker, orchestrator | chaque changement d'étape | dashboard.js |
 | `project_done` | worker | **succès uniquement** (historique, conservé) | dashboard.js |
 | `project_finished` | worker `_announce_finished` | **toute** fin : done, failed, killed | — point d'extension |
-| `message` (role assistant) | announcements | création, fin, échec de planification | home.js `showChannel` |
+| `message` (role assistant) | announcements | création, fin (avec la raison de la recette), plan inexploitable | home.js `showChannel` |
 | `notification` | file proactive (texte) | éléments texte | home.js `showChannel` |
 
 `project_finished` porte `project_id`, `title`, `status`, `files`, `reason`. **Pour réagir à la
@@ -78,7 +103,8 @@ fin d'une mission, écoute celui-là** : `project_done` ignore les échecs.
 | Réagir à la fin d'une mission | événement `project_finished` | Ou `MissionCompleted` sur le bus interne (`events.md`) |
 | Ajouter un backend d'exécution | `engine/mission/backends/` + `map_path()` | Chaque backend expose sa propre vue des chemins |
 | Donner un nouvel outil au worker | `worker_agent.py` : `_WORKER_TOOLS`, `_TOOL_ACCESS_LEVEL`, `_TOOL_CATEGORY`, branche dans `_tool_executor`, ligne dans `_WORKER_SYSTEM` | Les cinq, sinon l'outil est invisible, non gardé ou non exécuté. Une action destructrice va dans une catégorie ASK |
-| Changer ce qui compte comme vérification valide | `plan_normalizer.py` (`is_tautological`) et `verifier.py` | Les deux : le premier pour les nouveaux plans, le second pour les plans déjà enregistrés |
+| Changer ce qu'une étape a le droit de refuser | `quality_checker.py::_issues` | Uniquement des faits vrais à TOUT moment ; ce qui dépend de la fin de mission va dans la recette |
+| Changer la recette (preuves, consigne du juge) | `verifier.py::accept` | Le juge refuse avec preuve, jamais « dans le doute » |
 
 ## 5. Invariants — à ne pas casser
 
@@ -88,20 +114,17 @@ fin d'une mission, écoute celui-là** : `project_done` ignore les échecs.
 3. **Un niveau d'accès illisible n'est jamais auto-exécuté** : il prend le premier niveau
    au-dessus de `AUTO_MAX_LEVEL`. Un nombre hors bornes est arrondi vers le haut.
 4. **Un échec du planificateur est annoncé** dans la conversation, jamais perdu dans un log.
-5. **Une vérification doit pouvoir échouer.** Une commande qui réussit quoi qu'il arrive
-   (`… || echo …`, `|| true`, `; echo` final) est retirée du plan et ignorée par le
-   vérificateur : elle validerait un travail non fait. Cf. `plan_normalizer.is_tautological`.
-6. **Un refus de vérification dit quelle commande et pourquoi** — au worker pour sa relance,
-   et à l'utilisateur dans l'erreur de l'étape. Une relance aveugle échoue à l'identique.
+5. **Seule la recette juge si la demande est satisfaite.** Une étape n'échoue que sur un
+   défaut objectif ; aucune règle par étape ne juge le texte du code.
+6. **La recette voit tout ce qui s'est passé**, suppressions et sorties de commandes
+   comprises, et doit citer une preuve pour refuser.
 7. **Toute suppression passe par ton approbation** : `delete_file` est rattaché à la catégorie
    `file_delete` (ASK), et refusé si la gouvernance est absente.
 
 ## 6. Limites connues
 
-- **Vérifications écrites par le planificateur.** Elles restent produites par un LLM. Les
-  tautologies sont écartées automatiquement ; une vérification trop stricte (qui refuse un
-  travail correct) ne l'est pas — elle est seulement nommée, pour que la relance puisse s'y
-  conformer. Le prompt du planificateur porte les contre-exemples réels.
+- **La recette reste un LLM.** Elle voit les preuves complètes et doit les citer, mais son
+  jugement reste celui du modèle. Un Retry rejoue la recette (et au besoin une correction).
 - **Binaires POSIX sous Windows.** La whitelist de `worker_cli.py` (`touch`, `cat`, `ls`, `grep`…)
   vise macOS/Linux. Sous Windows ces commandes n'existent pas ; l'erreur les nomme désormais
   (`Commande introuvable : 'touch'`). Une mission qui n'écrit que via `write_file` n'est pas touchée.

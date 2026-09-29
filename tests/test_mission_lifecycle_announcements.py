@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jarvis.engine.mission import announcements as A
-from jarvis.engine.mission.orchestrator import PlanRejectedError, ProjectOrchestrator
+from jarvis.engine.mission.orchestrator import ProjectOrchestrator
 from jarvis.engine.mission.worker_agent import WorkerAgent
 from jarvis.kernel.schemas import Project, ProjectStatus, Step, StepStatus
 
@@ -193,25 +193,29 @@ def test_un_planificateur_en_panne_est_annonce() -> None:
     assert any("Ollama injoignable" in t for t in _chat(events))
 
 
-def test_un_plan_refuse_n_est_annonce_qu_une_fois() -> None:
-    """create_and_run annonce deja le refus : le relanceur ne doit pas doubler."""
+def test_un_plan_inexploitable_est_annonce_une_seule_fois() -> None:
+    """Plus de rejet pour critere manquant : seul un plan vide ou illisible echoue,
+    au normaliseur, et launch_in_background l'annonce — une fois."""
+    from jarvis.engine.mission.plan_normalizer import PlanError
+
     events: list = []
-    p = _project()
-    p.steps[0].success_criterion = ""  # refuse par validate_step
     manager = MagicMock()
-    manager.create_project = AsyncMock(return_value=p)
+    manager.create_project = AsyncMock(side_effect=PlanError("le plan ne contient aucune étape"))
     orch = _orchestrator(events, manager)
 
     async def _go() -> None:
         await orch.launch_in_background("crée un fichier", origin="test")
 
     asyncio.run(_go())
-    assert len(_chat(events)) == 1
+    annonces = _chat(events)
+    assert len(annonces) == 1 and "aucune étape" in annonces[0]
 
 
-def test_un_plan_refuse_reste_une_valueerror() -> None:
-    """Les appelants existants attrapent ValueError : la sous-classe les preserve."""
-    assert issubclass(PlanRejectedError, ValueError)
+def test_un_critere_manquant_ne_rejette_plus_le_plan() -> None:
+    import pathlib
+
+    src = pathlib.Path("src/jarvis/engine/mission/orchestrator.py").read_text(encoding="utf-8")
+    assert "validate_step" not in src
 
 
 @pytest.mark.parametrize(

@@ -23,13 +23,10 @@ recalé l'étape. Le critère de succès doit primer.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from jarvis.engine.mission.schemas import Step
-from jarvis.engine.mission.verifier import Verifier
 from main import app
 
 _STATIC = Path(__file__).resolve().parents[1] / "src/jarvis/interfaces/ui/static"
@@ -39,70 +36,9 @@ def _read(rel: str) -> str:
     return (_STATIC / rel).read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
-# ── Le critère prime sur « un fichier a-t-il bougé » ────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_met_criterion_is_not_overruled_by_the_llm(tmp_path: Path) -> None:
-    """proj_b2ca0d : la date était déjà dans le fichier, l'étape a échoué.
-
-    La couche structurelle passait (rien de malformé) et le `grep` du critère
-    passait aussi — c'est le JUGE LLM, en couche 3, qui a recalé l'étape avec
-    « Aucun fichier nouveau ou modifié ». Un critère objectivement atteint ne
-    se discute pas : la couche 3 ne doit même pas être appelée.
-    """
-    (tmp_path / "bonjour.txt").write_text("2026-09-23\n", encoding="utf-8")
-    quality = MagicMock()
-    quality.check_step_output.return_value = []
-    llm = MagicMock()
-    llm.complete = MagicMock(side_effect=AssertionError("le LLM ne doit pas être consulté"))
-    verifier = Verifier(
-        quality_checker=quality, llm=llm, cli_executor=None, workspace_path=str(tmp_path)
-    )
-    step = Step(
-        id="s2",
-        title="Écrire la date",
-        description="d",
-        verification_command=r"grep -E '^\d{4}-\d{2}-\d{2}$' bonjour.txt",
-    )
-
-    result = await verifier.verify(MagicMock(), step, files_before=["bonjour.txt"])
-
-    assert result.verified and result.layer == "deterministic"
-
-
-@pytest.mark.asyncio
-async def test_unmet_criterion_still_fails(tmp_path: Path) -> None:
-    (tmp_path / "bonjour.txt").write_text("$(date +%Y-%m-%d)", encoding="utf-8")
-    quality = MagicMock()
-    quality.check_step_output.return_value = []
-    verifier = Verifier(
-        quality_checker=quality, llm=MagicMock(), cli_executor=None, workspace_path=str(tmp_path)
-    )
-    step = Step(
-        id="s2",
-        title="t",
-        description="d",
-        verification_command=r"grep -E '^\d{4}-\d{2}-\d{2}$' bonjour.txt",
-    )
-
-    result = await verifier.verify(MagicMock(), step, files_before=[])
-
-    assert not result.verified
-
-
-@pytest.mark.asyncio
-async def test_structural_problem_still_caught_without_a_criterion(tmp_path: Path) -> None:
-    """Non-régression : sans commande, la couche structurelle garde son rôle."""
-    quality = MagicMock()
-    quality.check_step_output.return_value = ["Fichier vide"]
-    verifier = Verifier(
-        quality_checker=quality, llm=MagicMock(), cli_executor=None, workspace_path=str(tmp_path)
-    )
-
-    result = await verifier.verify(MagicMock(), Step(id="s", title="t", description="d"), [])
-
-    assert not result.verified and result.layer == "structural"
+# Les trois tests de vérificateur qui vivaient ici (proj_b2ca0d, proj_d57ef2,
+# couche structurelle) sont dans tests/test_verifier.py, réécrits pour la
+# recette de fin de mission.
 
 
 # ── L'endpoint de localisation ──────────────────────────────────────────────

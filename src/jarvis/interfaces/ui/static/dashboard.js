@@ -1144,7 +1144,7 @@
         if (!data) return;
         if (data.type === "approval_request") window.JarvisOverlays?.handleApprovalRequest(data);
         if (data.type === "project_update" || data.type === "project_done"
-            || data.type === "project_created" || data.type === "project_plan_invalid") {
+            || data.type === "project_created") {
           scheduleLiveRefresh();
         }
       };

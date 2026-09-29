@@ -21,7 +21,7 @@ Defauts corriges — tous DEMONTRES sur le code precedent, qui ne faisait que
 - `access_level: "WRITE_LOCAL"` ou `9` -> ValueError ;
 - `requires_approval: "false"` -> stocke tel quel, la CHAINE "false" est vraie :
   approbation demandee pour rien ;
-- identifiants dupliques acceptes, alors que reclamations et verification
+- identifiants dupliques acceptes, alors que les reclamations d'etapes
   fonctionnent par identifiant.
 """
 
@@ -44,19 +44,6 @@ _UNREADABLE_ACCESS = AccessLevel(min(int(AUTO_MAX_LEVEL) + 1, max(AccessLevel)))
 
 _TRUE = {"true", "vrai", "oui", "yes", "1"}
 
-# Commandes qui ne peuvent PAS échouer : leur code de retour est celui d'une
-# commande qui réussit toujours. proj_e7b565 (28/09) : l'étape « Supprimer
-# notes2.txt » était vérifiée par
-#     test -f notes2.txt && echo 'existe' || echo 'est supprimé'
-# qui rend 0 dans les deux cas. Le worker, sans outil de suppression, a affirmé
-# l'avoir fait ; la vérification a validé le mensonge ; notes2.txt était encore là.
-_ALWAYS_OK = r"(?:echo|printf|true|:|exit\s+0)\b"
-_TAUTOLOGY_RE = re.compile(
-    rf"\|\|\s*{_ALWAYS_OK}"          # … || echo …   : la branche d'échec réussit
-    rf"|;\s*{_ALWAYS_OK}[^;&|]*$"      # … ; echo …    : le dernier statut est celui d'echo
-    rf"|^\s*{_ALWAYS_OK}"              # echo …        : ne teste rien
-    r"|\bexit\s+0\s*$",              # … exit 0
-)
 
 
 class PlanError(ValueError):
@@ -126,16 +113,6 @@ def as_access_level(value: object) -> AccessLevel:
     return AccessLevel(clamped)
 
 
-def is_tautological(command: str | None) -> bool:
-    """Vrai si la commande de vérification réussit quoi qu'il arrive.
-
-    Une telle commande n'est pas une vérification : elle valide tout, y compris
-    un travail qui n'a pas été fait. On la retire du plan — l'étape reste alors
-    jugée par les couches structurelle et sémantique, qui ne sont pas dupes.
-    """
-    return bool(command) and bool(_TAUTOLOGY_RE.search(command))
-
-
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -161,16 +138,12 @@ def normalize_plan(data: dict[str, Any], *, mission: str) -> dict[str, Any]:
         title = _text(item.get("title")) or _text(item.get("description"))
         if not title:
             continue  # une etape sans titre ni description ne decrit rien
-        verification = _text(item.get("verification_command"))
-        if is_tautological(verification):
-            verification = ""  # ne peut pas échouer : ce n'est pas un test
         steps.append(
             {
                 "id": _text(item.get("id")),
                 "title": title,
                 "description": _text(item.get("description")) or title,
                 "success_criterion": _text(item.get("success_criterion")),
-                "verification_command": verification or None,
                 "requires_approval": as_bool(item.get("requires_approval")),
                 "access_level": int(as_access_level(item.get("access_level"))),
             }
@@ -181,24 +154,9 @@ def normalize_plan(data: dict[str, Any], *, mission: str) -> dict[str, Any]:
 
     return {
         "title": _text(data.get("title")) or (mission.strip()[:40] or "Mission"),
-        "project_type": _text(data.get("project_type")) or "generic",
         "requires_network": as_bool(data.get("requires_network")),
         "steps": steps,
     }
-
-
-def is_generated_report_step(step: dict[str, Any]) -> bool:
-    """Vrai pour l'etape RAPPORT.md que le moteur ajoute lui-meme.
-
-    L'ancien filtre retirait toute etape dont le TITRE contenait « rapport » :
-    pour « redige un rapport sur ma semaine », l'etape qui ecrivait le rapport
-    demande etait supprimee. On ne retire que ce qui cible le fichier RAPPORT.md.
-    """
-    haystack = " ".join(
-        str(step.get(k) or "")
-        for k in ("title", "description", "success_criterion", "verification_command")
-    )
-    return "rapport.md" in haystack.lower()
 
 
 def renumber_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:

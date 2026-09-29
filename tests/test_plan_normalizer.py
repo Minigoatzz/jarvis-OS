@@ -21,7 +21,6 @@ from jarvis.engine.mission.plan_normalizer import (
     as_access_level,
     as_bool,
     extract_plan_json,
-    is_generated_report_step,
     normalize_plan,
     renumber_steps,
 )
@@ -132,12 +131,6 @@ def test_la_renumerotation_supprime_les_doublons() -> None:
 # ── L'etape RAPPORT.md du moteur, et elle seule ─────────────────────────────
 
 
-def test_seule_l_etape_rapport_md_est_reconnue_comme_generee() -> None:
-    assert is_generated_report_step(_step(title="Générer RAPPORT.md"))
-    assert not is_generated_report_step(_step(title="Rédiger le rapport hebdomadaire"))
-    assert not is_generated_report_step(_step(title="Relire le rapport"))
-
-
 # ── Integration : le vrai planificateur ─────────────────────────────────────
 
 
@@ -196,46 +189,25 @@ def test_le_planificateur_accepte_de_la_prose_autour_du_json() -> None:
     assert projet.title == "T"
 
 
-# ── Une verification qui ne peut pas echouer n'est pas une verification ─────
+# ── Le planificateur ne fabrique plus de verifications ──────────────────────
+# La recette de fin juge la demande : le prompt ne demande plus de commande de
+# verification par etape, ni d'etape de test, de validation ou de rapport.
 
 
-@pytest.mark.parametrize(
-    "commande",
-    [
-        "test -f notes2.txt && echo 'existe' || echo 'supprimé'",  # proj_e7b565
-        "test -s out.txt || true",
-        "grep -q x f.txt; echo fini",
-        "echo ok",
-        "python3 s.py; exit 0",
-    ],
-)
-def test_une_tautologie_est_retiree_du_plan(commande: str) -> None:
-    from jarvis.engine.mission.plan_normalizer import is_tautological
-
-    assert is_tautological(commande)
-    plan = normalize_plan({"steps": [_step(verification_command=commande)]}, mission="m")
-    assert plan["steps"][0]["verification_command"] is None
-
-
-@pytest.mark.parametrize(
-    "commande",
-    [
-        "test -f notes1.txt && grep -c '^' notes1.txt",
-        "test -s RAPPORT.md && grep -c '^## ' RAPPORT.md | awk '{exit ($1 >= 3) ? 0 : 1}'",
-        "test -f index.html && echo trouve",
-        "! test -f notes2.txt",
-    ],
-)
-def test_une_vraie_verification_est_conservee(commande: str) -> None:
-    """Le filtre ne doit pas toucher la verification RAPPORT.md injectee par le moteur."""
-    plan = normalize_plan({"steps": [_step(verification_command=commande)]}, mission="m")
-    assert plan["steps"][0]["verification_command"] == commande
-
-
-def test_le_prompt_du_planificateur_porte_les_contre_exemples_du_jour() -> None:
+def test_le_prompt_ne_demande_plus_de_verification_par_etape() -> None:
     from jarvis.engine.mission.project_manager import _PLANNING_SYSTEM as prompt
 
-    assert "UNE étape qui l'écrit EN ENTIER" in prompt
-    assert "RÉSULTAT OBSERVABLE" in prompt
-    assert "! test -f notes2.txt" in prompt
-    assert "delete_file" in prompt
+    assert "verification_command" not in prompt
+    assert "AUCUNE étape de test" in prompt
+    assert "Le MOINS d'étapes possible" in prompt
+
+
+def test_une_commande_de_verification_du_modele_est_ignoree() -> None:
+    plan = normalize_plan({"steps": [_step(verification_command="grep x f")]}, mission="m")
+    assert "verification_command" not in plan["steps"][0]
+
+
+def test_aucune_etape_n_est_ajoutee_au_plan() -> None:
+    """Le moteur injectait une etape de test et une etape RAPPORT.md a chaque mission."""
+    projet = _planifier({"title": "T", "steps": [_step()]})
+    assert [s.title for s in projet.steps] == ["Écrire"]

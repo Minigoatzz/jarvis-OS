@@ -16,6 +16,10 @@ from loguru import logger
 
 from jarvis.kernel.error_collector import collector  # jrv: autofix
 
+# Fichiers vides par nature : les signaler ferait échouer toute mission Python
+# qui crée un paquet (« __init__.py »).
+_EMPTY_BY_NATURE = frozenset({"__init__.py", ".gitkeep"})
+
 
 class QualityChecker:
     def __init__(self, workspace_path: str) -> None:
@@ -93,44 +97,39 @@ class QualityChecker:
 
     # ── Full report ───────────────────────────────────────────────────────────
 
-    def generate_report(self) -> dict:
-        """Rapport de qualité complet : fichiers, problèmes détectés."""
-        files = self.list_all_files()
-        issues = []
+    def _issues(self, *, cross_file: bool) -> list[str]:
+        """Problèmes objectifs sur TOUS les fichiers du workspace.
 
-        for f in files:
-            if f["size"] == 0:
-                issues.append(f"Fichier vide: {f['path']}")
-            if f["extension"] == ".html":
-                missing = self.check_html_references(f["path"])
-                issues.extend(missing)
+        `cross_file` ajoute les contrôles qui dépendent d'autres fichiers (références
+        d'un HTML). Ils ne valent qu'une fois la mission finie : un plan normal écrit
+        index.html AVANT style.css, et les vérifier à chaque étape faisait échouer
+        l'étape du HTML. Un seul endroit pour ces règles — generate_report et
+        check_step_output en tenaient chacun une copie, qui avaient divergé.
+        """
+        issues: list[str] = []
+        for f in self.list_all_files():
+            if f["size"] == 0 and Path(f["path"]).name not in _EMPTY_BY_NATURE:
+                issues.append(f"Fichier vide : {f['path']}")
             if f["extension"] == ".py":
                 result = self.check_python_syntax(f["path"])
                 if not result["valid"]:
-                    issues.append(f"Syntaxe Python invalide dans {f['path']}: {result['error']}")
+                    issues.append(f"Syntaxe Python invalide dans {f['path']} : {result['error']}")
+            if cross_file and f["extension"] == ".html":
+                issues.extend(self.check_html_references(f["path"]))
+        return issues
 
-        valid = len(issues) == 0
+    def generate_report(self) -> dict:
+        """Rapport de qualité complet, fin de mission : fichiers et problèmes."""
+        files = self.list_all_files()
+        issues = self._issues(cross_file=True)
+        valid = not issues
         logger.info("QualityChecker report", files=len(files), issues=len(issues), valid=valid)
         return {"files": files, "issues": issues, "valid": valid}
 
-    # ── Incremental check (post-step) ─────────────────────────────────────────
+    def check_step_output(self) -> list[str]:
+        """Contrôle après une étape : ce qui doit être vrai à TOUT moment.
 
-    def check_step_output(self, files_before: list[str]) -> list[str]:
-        """Détecte les problèmes sur les fichiers créés/modifiés depuis la dernière vérif."""
-        current = {f["path"]: f for f in self.list_all_files()}
-        new_paths = [p for p in current if p not in files_before]
-        issues = []
-
-        for path in new_paths:
-            f = current[path]
-            if f["size"] == 0:
-                issues.append(f"Fichier vide créé: {path}")
-            if f["extension"] == ".html":
-                missing = self.check_html_references(path)
-                issues.extend(missing)
-            if f["extension"] == ".py":
-                result = self.check_python_syntax(path)
-                if not result["valid"]:
-                    issues.append(f"Syntaxe Python invalide dans {path}: {result['error']}")
-
-        return issues
+        Tous les fichiers, pas seulement les nouveaux : l'ancienne version ne
+        voyait pas un fichier existant réécrit avec une erreur de syntaxe.
+        """
+        return self._issues(cross_file=False)

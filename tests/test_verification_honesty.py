@@ -2,146 +2,210 @@
 # This file is part of Jarvis OS, licensed under the GNU AGPL-3.0-or-later.
 # See the LICENSE file or <https://www.gnu.org/licenses/agpl-3.0.html>.
 
-"""Une verification doit pouvoir echouer, et dire pourquoi.
+"""Une mission est jugee sur son RESULTAT, pas etape par etape.
 
-Deux missions du 28/09 au soir, deux defauts de la meme famille :
+Les deux missions mortes du 28/09 avaient un travail correct :
+- proj_b67093 : script juste, refuse par une regex sur le texte du code ;
+- proj_e7b565 : notes2.txt supprime avec ton accord, puis refuse par un juge qui
+  ne voyait pas les suppressions et devait « refuser dans le doute ».
 
-- proj_e7b565 : « Supprimer notes2.txt » verifie par
-  `test -f notes2.txt && echo ... || echo ...` — rend 0 dans les deux cas. Le
-  worker, sans outil de suppression, a affirme l'avoir fait ; la verification
-  a valide le mensonge ; notes2.txt etait encore la.
-- proj_b67093 : script correct, mais la verification exigeait le texte
-  litteral `print(generate_primes(100))`. Le worker recevait « 0 ligne(s)
-  correspondent au motif » — sans le motif. Ses deux relances ont echoue
-  a l'identique.
+Ces tests pilotent le VRAI worker (vrai store, vrai controle objectif) avec un
+LLM factice qui joue a la fois l'agent et le juge de recette.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
+import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from jarvis.engine.mission.quality_checker import QualityChecker
-from jarvis.engine.mission.verifier import Verifier
-from jarvis.engine.mission.worker_agent import (
-    _TOOL_CATEGORY,
-    _WORKER_TOOLS,
-    WorkerAgent,
-)
-from jarvis.kernel.schemas import Project, Step, StepStatus
+import pytest
+
+import jarvis.engine.mission.project_store as project_store
+from jarvis.engine.mission.project_store import ProjectStore
+from jarvis.engine.mission.worker_agent import _TOOL_CATEGORY, _WORKER_TOOLS, WorkerAgent
+from jarvis.kernel.schemas import Project, ProjectStatus, Step, StepStatus
 
 
-class _Juge:
-    """Couche semantique factice : on controle son verdict, on compte ses appels."""
+class _LLM:
+    """`tool_loop` rejoue une liste d'actions ; `complete` rend les verdicts de recette."""
 
-    def __init__(self, verified: bool, notes: str = "") -> None:
-        self._raw = json.dumps({"verified": verified, "issues": [], "notes": notes})
-        self.calls = 0
+    def __init__(self, actions: list[list[tuple[str, dict]]], verdicts: list[object]) -> None:
+        self._actions = list(actions)
+        self._verdicts = list(verdicts)
+        self.recettes = 0
 
-    async def complete(self, *a: object, **k: object) -> str:
-        self.calls += 1
-        return self._raw
+    async def tool_loop(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        tool_executor: Callable[[str, dict], Awaitable[str]],
+        context: str = "",
+    ) -> str:
+        for name, args in self._actions.pop(0) if self._actions else []:
+            await tool_executor(name, args)
+        return "fait"
 
-    async def health_check(self) -> bool:
-        return True
-
-
-def _setup(commande: str, fichiers: dict[str, str]) -> tuple[Project, Step, str]:
-    ws = tempfile.mkdtemp()
-    for nom, contenu in fichiers.items():
-        (Path(ws) / nom).write_text(contenu, encoding="utf-8")
-    step = Step("s1", "étape", "d", success_criterion="c", verification_command=commande)
-    return Project(id="p", title="t", mission="m", steps=[step], workspace_path=ws), step, ws
-
-
-def _verifier(ws: str, juge: _Juge, cli: object = None) -> Verifier:
-    return Verifier(QualityChecker(ws), juge, cli_executor=cli, workspace_path=ws)  # type: ignore[arg-type]
-
-
-# ── 1. Une commande qui ne peut pas echouer n'est pas une verification ──────
+    async def complete(self, messages: list[dict], system: str, **_: object) -> str:
+        self.recettes += 1
+        verdict = self._verdicts.pop(0)
+        if isinstance(verdict, Exception):
+            raise verdict
+        return verdict if isinstance(verdict, str) else json.dumps(verdict)
 
 
-def test_une_tautologie_ne_valide_pas_un_travail_non_fait() -> None:
-    """notes2.txt existe encore : le juge semantique doit trancher, pas `|| echo`."""
-    project, step, ws = _setup(
-        "test -f notes2.txt && echo 'existe' || echo 'supprimé'",
-        {"notes2.txt": "encore la\n"},
-    )
-    juge = _Juge(False, "notes2.txt n'a pas été supprimé")
-
-    async def _cli_toujours_ok(cmd: str, t: int) -> dict:  # noqa: ASYNC109
-        return {"success": True, "stdout": "notes2.txt existe", "stderr": "", "returncode": 0}
-
-    verdict = asyncio.run(_verifier(ws, juge, _cli_toujours_ok).verify(project, step, []))
-
-    assert verdict.verified is False, "la tautologie avait valide le mensonge"
-    assert juge.calls == 1, "c'est la couche semantique qui doit juger"
-    assert "notes2.txt" in verdict.notes
+def _ok(reason: str = "demande satisfaite") -> dict:
+    return {"accepted": True, "missing": [], "reason": reason}
 
 
-# ── 2. Un echec dit quelle commande, et pourquoi ────────────────────────────
+def _refus(*manques: str) -> dict:
+    return {"accepted": False, "missing": list(manques), "reason": "incomplet"}
 
 
-def test_la_relance_sait_quelle_verification_viser() -> None:
+@pytest.fixture
+def lancer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
+    """Construit et lance un worker isole : jamais le vrai dossier de missions."""
+    monkeypatch.setattr(project_store, "WORKSPACE_DIR", tmp_path / "claims")
+
+    def _lancer(mission: str, titres: list[str], llm: _LLM) -> tuple[Project, list[dict]]:
+        ws = tmp_path / uuid.uuid4().hex[:6]
+        (ws / ".jarvis").mkdir(parents=True)
+        projet = Project(
+            id="t" + uuid.uuid4().hex[:6],
+            title=mission,
+            mission=mission,
+            workspace_path=str(ws),
+            steps=[Step(f"step_{i:03d}", t, "d") for i, t in enumerate(titres, 1)],
+        )
+        evenements: list[dict] = []
+        worker = WorkerAgent(
+            project=projet,
+            store=ProjectStore(),
+            broadcast_event=evenements.append,
+            approval_callback=AsyncMock(return_value=True),  # type: ignore[arg-type]
+            llm=llm,  # type: ignore[arg-type]
+        )
+        asyncio.run(worker.run())
+        return projet, evenements
+
+    return _lancer
+
+
+def _annonce(evenements: list[dict]) -> str:
+    return [e["text"] for e in evenements if e.get("type") == "message"][-1]
+
+
+# ── 1. Les deux incidents du 28/09 ──────────────────────────────────────────
+
+
+def test_un_script_correct_ecrit_a_sa_facon_est_accepte(lancer) -> None:  # noqa: ANN001
+    """Plus aucune regex sur le texte du code : la recette juge la demande."""
     script = "primes = generate_primes(100)\nprint(primes)\n"
-    commande = r"grep -E 'print\(generate_primes\(100\)' script.py"
-    project, step, ws = _setup(commande, {"script.py": script})
-
-    verdict = asyncio.run(_verifier(ws, _Juge(True)).verify(project, step, []))
-
-    assert verdict.verified is False
-    consigne = " ".join(verdict.issues)
-    assert commande in consigne, "sans la commande, le worker corrige a l'aveugle"
-    assert "0 ligne(s)" in consigne
-    assert commande in verdict.notes, "l'utilisateur doit la voir aussi"
+    llm = _LLM([[("write_file", {"path": "script.py", "content": script})]], [_ok()])
+    projet, _ = lancer("écris un script qui calcule les nombres premiers", ["Écrire"], llm)
+    assert projet.status is ProjectStatus.DONE
 
 
-def test_une_commande_executee_qui_echoue_se_nomme_aussi() -> None:
-    project, step, ws = _setup("pytest -x", {"ok.py": "x = 1\n"})
+def test_une_suppression_reussie_est_acceptee(lancer) -> None:  # noqa: ANN001
+    llm = _LLM(
+        [
+            [("write_file", {"path": "notes1.txt", "content": "a"}),
+             ("write_file", {"path": "notes2.txt", "content": "b"})],
+            [("delete_file", {"path": "notes2.txt"})],
+        ],
+        [_ok()],
+    )
+    projet, _ = lancer("crée des notes puis supprime notes2.txt", ["Créer", "Supprimer"], llm)
+    assert projet.status is ProjectStatus.DONE
+    assert not (Path(projet.workspace_path) / "notes2.txt").exists()
 
-    async def _cli_echec(cmd: str, t: int) -> dict:  # noqa: ASYNC109
-        return {"success": False, "stdout": "", "stderr": "1 failed", "returncode": 1}
 
-    verdict = asyncio.run(_verifier(ws, _Juge(True), _cli_echec).verify(project, step, []))
-    assert any("pytest -x" in i and "1 failed" in i for i in verdict.issues)
+# ── 2. Une etape est un progres, pas un verdict ─────────────────────────────
 
 
-# ── 3. L'erreur finale de l'etape porte la raison ───────────────────────────
+def test_seul_un_defaut_objectif_arrete_une_etape(lancer) -> None:  # noqa: ANN001
+    """Un fichier vide, deux fois : la mission s'arrete, les etapes suivantes ne tournent pas."""
+    vide = [("write_file", {"path": "notes.txt", "content": ""})]
+    llm = _LLM([vide, vide], [])
+    projet, _ = lancer("m", ["Écrire", "Suite"], llm)
+    assert projet.status is ProjectStatus.FAILED
+    assert projet.steps[0].status is StepStatus.FAILED
+    assert "vide" in (projet.steps[0].error or "")
+    assert projet.steps[1].status is StepStatus.PENDING
+    assert llm.recettes == 0, "une etape cassee n'a pas besoin de recette"
 
 
-def test_l_erreur_de_l_etape_cite_ce_que_le_verificateur_a_vu() -> None:
-    """L'utilisateur ne lisait que « Verification non concluante apres 2 essais »."""
-    ws = tempfile.mkdtemp()
-    step = Step("s1", "Vérification", "d", success_criterion="c")
-    project = Project(id="p", title="t", mission="m", steps=[step], workspace_path=ws)
+# ── 3. Refus, correction, verdict final ─────────────────────────────────────
+
+
+def test_un_refus_argumente_declenche_une_correction_visible(lancer) -> None:  # noqa: ANN001
+    llm = _LLM(
+        [
+            [("write_file", {"path": "rapport.md", "content": "# Semaine"})],
+            [("write_file", {"path": "semaine.md", "content": "# Semaine\n## Lundi"})],
+        ],
+        [_refus("semaine.md absent"), _ok()],
+    )
+    projet, _ = lancer("rédige semaine.md", ["Rédiger"], llm)
+
+    assert projet.status is ProjectStatus.DONE
+    assert projet.steps[-1].title == "Corriger d'après la recette"
+    assert "semaine.md absent" in projet.steps[-1].description
+    assert llm.recettes == 2
+
+
+def test_deux_refus_font_echouer_la_mission_avec_la_raison(lancer) -> None:  # noqa: ANN001
+    llm = _LLM(
+        [[("write_file", {"path": "a.md", "content": "x"})],
+         [("write_file", {"path": "a.md", "content": "y"})]],
+        [_refus("semaine.md absent"), _refus("semaine.md toujours absent")],
+    )
+    projet, evenements = lancer("rédige semaine.md", ["Rédiger"], llm)
+
+    assert projet.status is ProjectStatus.FAILED
+    assert "semaine.md toujours absent" in _annonce(evenements)
+    assert sum(s.title == "Corriger d'après la recette" for s in projet.steps) == 1
+
+
+def test_un_juge_en_panne_ne_lance_pas_de_correction(lancer) -> None:  # noqa: ANN001
+    llm = _LLM([[("write_file", {"path": "a.md", "content": "x"})]],
+               [ConnectionError("Ollama injoignable")])
+    projet, evenements = lancer("m", ["Écrire"], llm)
+
+    assert projet.status is ProjectStatus.FAILED
+    assert all(s.title != "Corriger d'après la recette" for s in projet.steps)
+    assert "Ollama injoignable" in _annonce(evenements)
+
+
+# ── 4. Les preuves consignees ───────────────────────────────────────────────
+
+
+def test_une_commande_est_consignee_avec_son_code_et_sa_sortie(tmp_path: Path) -> None:
+    projet = Project(id="p", title="t", mission="m", workspace_path=str(tmp_path))
     worker = WorkerAgent(
-        project=project,
-        store=MagicMock(),
-        broadcast_event=MagicMock(),
-        approval_callback=AsyncMock(),  # type: ignore[arg-type]
-        llm=MagicMock(),
+        project=projet, store=MagicMock(), broadcast_event=MagicMock(),
+        approval_callback=AsyncMock(), llm=MagicMock(),  # type: ignore[arg-type]
     )
     worker._log = AsyncMock()  # type: ignore[method-assign]
-    worker._run_step_llm = AsyncMock(return_value="fait")  # type: ignore[method-assign]
-    refus = MagicMock(verified=False, unverified=False, layer="semantic", issues=[],
-                      notes="notes2.txt n'a pas été supprimé")
-    worker._verifier = MagicMock()
-    worker._verifier.verify = AsyncMock(return_value=refus)
+    worker._cli_tool = MagicMock()
+    worker._cli_tool.execute = AsyncMock(
+        return_value={"success": True, "stdout": "[2, 3, 5]", "stderr": "", "returncode": 0}
+    )
 
-    asyncio.run(worker._execute_with_verification(step))  # la boucle verifier + relances
+    asyncio.run(worker._tool_executor("execute_cli", {"command": "python3 script.py"}))
 
-    assert step.status is StepStatus.FAILED
-    assert "notes2.txt n'a pas été supprimé" in (step.error or "")
+    data = worker._log.call_args.kwargs["data"]
+    assert data == {"returncode": 0, "output": "[2, 3, 5]"}
 
 
-# ── 4. Supprimer est possible, et toujours sous approbation ─────────────────
+# ── 5. Supprimer : possible, et toujours sous approbation ───────────────────
 
 
 def test_le_worker_dispose_d_un_outil_de_suppression() -> None:
-    """Sans lui, toute demande de suppression etait vouee a l'echec — ou au mensonge."""
     assert "delete_file" in [t["name"] for t in _WORKER_TOOLS]
 
 
@@ -150,17 +214,12 @@ def test_chaque_suppression_passe_par_la_categorie_file_delete() -> None:
     assert _TOOL_CATEGORY["delete_file"] == "file_delete"
 
 
-def test_sans_gouvernance_la_suppression_est_refusee() -> None:
-    """Le gate laisse tout passer sans gouvernance : pour supprimer, on l'exige."""
-    ws = tempfile.mkdtemp()
-    (Path(ws) / "notes2.txt").write_text("x")
-    project = Project(id="p", title="t", mission="m", workspace_path=ws)
+def test_sans_gouvernance_la_suppression_est_refusee(tmp_path: Path) -> None:
+    (tmp_path / "notes2.txt").write_text("x")
+    projet = Project(id="p", title="t", mission="m", workspace_path=str(tmp_path))
     worker = WorkerAgent(
-        project=project,
-        store=MagicMock(),
-        broadcast_event=MagicMock(),
-        approval_callback=AsyncMock(),  # type: ignore[arg-type]
-        llm=MagicMock(),
+        project=projet, store=MagicMock(), broadcast_event=MagicMock(),
+        approval_callback=AsyncMock(), llm=MagicMock(),  # type: ignore[arg-type]
     )
     worker._log = AsyncMock()  # type: ignore[method-assign]
     worker._governance = None
@@ -168,4 +227,4 @@ def test_sans_gouvernance_la_suppression_est_refusee() -> None:
     resultat = asyncio.run(worker._tool_executor("delete_file", {"path": "notes2.txt"}))
 
     assert "REFUS" in resultat.upper()
-    assert (Path(ws) / "notes2.txt").exists()
+    assert (tmp_path / "notes2.txt").exists()

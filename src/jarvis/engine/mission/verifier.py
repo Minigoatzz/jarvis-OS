@@ -1,415 +1,220 @@
-# Copyright (C) 2026 Barthélemy Houot
+# Copyright (C) 2026 Barthelemy Houot
 # This file is part of Jarvis OS, licensed under the GNU AGPL-3.0-or-later.
 # See the LICENSE file or <https://www.gnu.org/licenses/agpl-3.0.html>.
 
-"""Self-verification en 3 couches (CDC §4.3).
+"""Verification d'une mission : un controle objectif par etape, une recette a la fin.
 
-Couche 1 — structurelle : QualityChecker existant (artefact bien formé).
-Couche 2 — déterministe : step.verification_command via cli sandboxé (exit 0).
-Couche 3 — sémantique : LLM grader STRICT qui compare au success_criterion.
+Pourquoi cette forme
+--------------------
+L'ancienne version jugeait CHAQUE etape comme une porte bloquante, avec trois
+couches : la structure, une commande shell ecrite par le planificateur, puis un
+juge LLM. Sur l'ensemble des missions : 15 refus, dont 13 venaient des deux
+dernieres couches — et les deux missions mortes du 28/09 avaient un travail
+correct (proj_b67093) ou corrige juste avant le refus (proj_e7b565).
 
-Règle absolue : en cas de doute (parse impossible, erreur LLM), verified=false.
-Un échec de parse n'est jamais un succès. La vérification structurelle ne doit pas
-appeler le LLM ; la sémantique ne re-vérifie pas la syntaxe.
+- La commande du planificateur jugeait le TEXTE du code, pas le but : elle a
+  refuse un script juste et valide une suppression jamais faite.
+- Le juge LLM ne voyait que les fichiers nouveaux — ni les modifies, ni les
+  supprimes — et avait pour consigne « dans le doute, refuse ».
+- Chaque porte devait passer : 8 portes a 90 % donnent 43 % de reussite.
+
+Chaque correctif ajoute ensuite (evaluateur natif de commandes shell, filtre
+a tautologies, messages de relance) compensait le precedent. Ils sont retires.
+
+Ce qui reste
+------------
+1. `check_step` — par etape, uniquement ce qui est vrai a TOUT moment de la
+   mission : aucun fichier vide, Python syntaxiquement valide. Sur tous les
+   fichiers, pas seulement les nouveaux.
+2. `accept` — une seule recette, a la fin, sur la DEMANDE de l'utilisateur, avec
+   toutes les preuves : chaque fichier et son contenu, le journal des actions
+   (ecritures, suppressions, commandes et leurs sorties). Pour refuser, le juge
+   doit citer ce qui manque. Sans preuve de manque, la mission est acceptee.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
 
-from jarvis.engine.mission.native_checks import evaluate
-from jarvis.engine.mission.plan_normalizer import is_tautological
 from jarvis.engine.mission.quality_checker import QualityChecker
-from jarvis.engine.mission.schemas import Project, Step
+from jarvis.engine.mission.schemas import Project
 from jarvis.kernel.contracts import LLMProvider
 from jarvis.kernel.error_collector import collector  # jrv: autofix
+from jarvis.kernel.schemas import LogEntry
 
-# Plafond de contenu inclus dans le prompt sémantique (caractères).
-# Au-dessus, on tronque pour ne pas exploser les tokens.
+# Budget de preuves transmis au juge (caracteres / fichiers / lignes de journal).
 _MAX_CONTENT_CHARS = 6000
-_MAX_FILES_INCLUDED = 10
+_MAX_FILES = 12
+_MAX_JOURNAL = 40
+
+# Niveaux du journal qui constituent une PREUVE d'action.
+_EVIDENCE_LEVELS = ("tool", "error", "approval")
+
+_TEXT_EXTS = {
+    ".html", ".css", ".js", ".ts", ".py", ".json", ".md", ".txt",
+    ".yaml", ".yml", ".toml", ".xml", ".sh", ".csv",
+}
 
 
 @dataclass
 class VerificationResult:
-    """Verdict d'une vérification."""
+    """Verdict du controle objectif d'une etape."""
 
     verified: bool
-    layer: str  # "structural" | "deterministic" | "semantic"
     issues: list[str] = field(default_factory=list)
-    notes: str = ""
-    # True quand on n'a PAS PU vérifier (exécution refusée, commande non
-    # interprétable). L'étape continue, mais elle n'est pas déclarée vérifiée :
-    # « pas vérifiable » n'est ni un succès ni un échec, et le dire autrement
-    # serait le mensonge qu'on traque partout ailleurs.
-    unverified: bool = False
 
 
-_SEMANTIC_SYSTEM = (
-    "Tu es un évaluateur STRICT et SCEPTIQUE d'une étape de mission d'agent. "
-    "Ton seul travail est de juger si l'artefact produit RÉPOND VRAIMENT au critère "
-    "de succès, pas seulement s'il existe ou compile. Tu réponds UNIQUEMENT en JSON, "
-    "sans markdown, sans commentaire, sans préambule."
+@dataclass
+class Acceptance:
+    """Verdict de la recette finale."""
+
+    accepted: bool
+    reason: str = ""
+    missing: list[str] = field(default_factory=list)
+    # False quand le juge n'a PAS PU se prononcer (erreur, réponse illisible) :
+    # il n'y a alors rien de précis à corriger, donc pas de ronde de correction.
+    judged: bool = True
+
+
+_ACCEPT_SYSTEM = (
+    "Tu es le responsable de la recette d'une mission confiée à un agent. Tu juges si "
+    "la DEMANDE de l'utilisateur est satisfaite par l'état final. Tu réponds UNIQUEMENT "
+    "en JSON, sans markdown ni préambule."
 )
 
 
-def _failed_check_issue(command: str | None, detail: str) -> str:
-    """Consigne de relance quand la vérification déterministe échoue.
-
-    Le worker recevait « 0 ligne(s) correspondent au motif » — sans le motif,
-    sans la commande. proj_b67093 (28/09) : le script était correct, mais la
-    vérification exigeait le texte littéral « print(generate_primes(100)) » ;
-    le worker ignorait ce qu'on attendait de lui, et ses deux relances ont
-    échoué de la même façon. La relance n'a de sens que si elle sait QUOI viser.
-    """
-    return (
-        f"La vérification « {command} » a échoué : {detail}. "
-        f"Modifie le travail pour que cette commande réussisse telle quelle."
-    )
-
-
 class Verifier:
-    """Pipeline 3-couches de vérification d'un step.
+    """Controle objectif par etape + recette finale fondee sur les preuves."""
 
-    `cli_executor` est une coroutine `(command, timeout) -> {success, stdout, stderr, returncode}`
-    typiquement `WorkerCLITool.execute`. None → couche 2 désactivée (mais traçable).
-    """
-
-    def __init__(
-        self,
-        quality_checker: QualityChecker,
-        llm: LLMProvider,
-        cli_executor: Callable[[str, int], Awaitable[dict]] | None = None,
-        workspace_path: str | None = None,
-    ) -> None:
+    def __init__(self, quality_checker: QualityChecker, llm: LLMProvider) -> None:
         self._quality = quality_checker
         self._llm = llm
-        self._cli = cli_executor
-        self._workspace = Path(workspace_path) if workspace_path else None
 
-    # ── Point d'entrée principal ──────────────────────────────────────────────
+    # ── Par etape : objectif, sans LLM ────────────────────────────────────────
 
-    async def verify(
-        self,
-        project: Project,
-        step: Step,
-        files_before: list[str],
-    ) -> VerificationResult:
-        """Lance les couches en cascade. Stop à la première qui échoue.
+    def check_step(self) -> VerificationResult:
+        issues = self._quality.check_step_output()
+        return VerificationResult(verified=not issues, issues=issues)
 
-        La couche 2 FAIT FOI quand elle passe : sa docstring le disait déjà,
-        mais le code enchaînait quand même sur le juge LLM. Observé le 24/09
-        (proj_b2ca0d) : l'étape 1 avait déjà écrit la date, l'étape 2 a réécrit
-        le même contenu, la vérification `grep` du critère est passée — et le
-        LLM a recalé l'étape avec « Aucun fichier nouveau ou modifié ». Le
-        fichier contenait pourtant exactement ce qui était demandé.
+    # ── Fin de mission : la recette ───────────────────────────────────────────
 
-        La couche 1 (fichier vide, Python invalide, HTML cassé) garde la
-        priorité : un critère atteint avec un artefact malformé reste un échec.
-        """
-        # Couche 1
-        structural = self._layer_structural(files_before)
-        if not structural.verified:
-            return structural
-
-        # Couche 2 — sauf si la commande ne peut pas échouer (« … || echo … ») :
-        # elle validerait n'importe quoi, et cette couche fait foi. Filtrée aussi
-        # à la planification ; ici pour les plans déjà enregistrés (Retry).
-        if (
-            step.verification_command
-            and not is_tautological(step.verification_command)
-            and (self._cli is not None or self._workspace is not None)
-        ):
-            deterministic = await self._layer_deterministic(step)
-            if not deterministic.verified:
-                return deterministic
-            if not deterministic.unverified:
-                # Critère objectivement atteint : le juge LLM n'a rien à ajouter,
-                # et il ne doit surtout pas pouvoir le contredire.
-                return deterministic
-
-        # Couche 3
-        return await self._layer_semantic(project, step, files_before)
-
-    # ── Couche 1 — structurelle ───────────────────────────────────────────────
-
-    def _layer_structural(self, files_before: list[str]) -> VerificationResult:
-        """Réutilise QualityChecker.check_step_output() tel quel (CDC §4.3)."""
-        issues = self._quality.check_step_output(files_before)
-        if issues:
-            return VerificationResult(
-                verified=False,
-                layer="structural",
-                issues=issues,
-                notes=(
-                    "Artefact mal formé (fichier vide, syntaxe invalide, refs HTML manquantes...)"
-                ),
-            )
-        return VerificationResult(verified=True, layer="structural")
-
-    # ── Couche 2 — déterministe ───────────────────────────────────────────────
-
-    async def _layer_deterministic(self, step: Step) -> VerificationResult:
-        """Exécute step.verification_command. Exit 0 = succès. Cette couche fait foi."""
-        assert step.verification_command is not None
-
-        # 2a — évaluation native, sans processus. Couvre les vérifications
-        # courantes (fichier existe / non vide / contient un motif / N sections)
-        # et fonctionne sous Windows, où test/grep/awk n'existent pas.
-        if self._workspace is not None:
-            native = evaluate(step.verification_command, self._workspace)
-            if native is not None:
-                if native.passed:
-                    return VerificationResult(
-                        verified=True, layer="deterministic", notes=native.detail
-                    )
-                return VerificationResult(
-                    verified=False,
-                    layer="deterministic",
-                    issues=[_failed_check_issue(step.verification_command, native.detail)],
-                    notes=f"Critère non atteint : {native.detail} — vérification « "
-                    f"{step.verification_command} »",
-                )
-
-        if self._cli is None:
-            return VerificationResult(
-                verified=True,
-                layer="deterministic",
-                unverified=True,
-                notes=f"Non vérifiée : aucun moyen d'évaluer « {step.verification_command} »",
-            )
-
-        try:
-            res = await self._cli(step.verification_command, 60)
-        except Exception as exc:  # noqa: BLE001 — on capture tout exec error
-            collector.error("JRV-MSN-001", "JRV-MSN-001", cause=exc)
-            logger.warning("Verifier couche 2 — erreur d'exécution", error=str(exc))
-            return VerificationResult(
-                verified=False,
-                layer="deterministic",
-                issues=[f"erreur d'exécution: {exc}"],
-                notes="Échec d'exécution de verification_command",
-            )
-
-        if not res.get("success", False):
-            refused = res.get("returncode") in (-1, None) and "refus" in (
-                (res.get("stderr") or "") + (res.get("stdout") or "")
-            ).lower()
-            if refused:
-                # L'exécution est coupée (ni Docker ni opt-in) : on n'a rien
-                # appris sur l'étape. La faire échouer tuait toute mission
-                # comportant une vérification — panne du 13 et du 23/09.
-                return VerificationResult(
-                    verified=True,
-                    layer="deterministic",
-                    unverified=True,
-                    notes="Non vérifiée : exécution de commandes désactivée sur cette machine",
-                )
-            sortie = ((res.get("stderr") or "") or (res.get("stdout") or "")).strip()
-            detail = f"code de retour {res.get('returncode')}" + (
-                f", sortie : {sortie[:300]}" if sortie else ""
-            )
-            return VerificationResult(
-                verified=False,
-                layer="deterministic",
-                issues=[_failed_check_issue(step.verification_command, detail)],
-                notes=f"Critère non atteint : {detail} — vérification « "
-                f"{step.verification_command} »",
-            )
-        return VerificationResult(verified=True, layer="deterministic")
-
-    # ── Couche 3 — sémantique LLM ─────────────────────────────────────────────
-
-    async def _layer_semantic(
-        self,
-        project: Project,
-        step: Step,
-        files_before: list[str] | None = None,
-    ) -> VerificationResult:
-        """Appel LLM strict-sceptique. En cas de doute → verified=false.
-
-        Le prompt inclut le CONTENU des fichiers nouveaux/modifiés depuis files_before
-        (tronqué) pour permettre une vraie évaluation, pas un jugement sur la simple
-        liste de fichiers.
-        """
-        new_files_block = self._new_files_with_content(
-            project.workspace_path,
-            files_before or [],
-        )
+    async def accept(self, project: Project, journal: list[LogEntry]) -> Acceptance:
         prompt = (
-            f"## Mission globale\n{project.mission}\n\n"
-            f"## Étape à évaluer\n"
-            f"Titre : {step.title}\n"
-            f"Description : {step.description}\n"
-            f"Critère de succès : {step.success_criterion}\n\n"
-            f"## Résultat rapporté par l'agent (auto-rapport, à ne pas faire confiance seul)\n"
-            f"{step.output or '(aucun output)'}\n\n"
-            f"## Liste des fichiers du workspace\n"
-            f"{self._workspace_summary()}\n\n"
-            f"## CONTENU des fichiers nouveaux/modifiés (vérité de terrain)\n"
-            f"{new_files_block}\n\n"
-            f"## Tâche\n"
-            f"Réponds UNIQUEMENT avec ce JSON :\n"
-            f'{{"verified": true|false, "issues": ["..."], "notes": "..."}}\n\n'
-            f"Évalue le CONTENU réel ci-dessus contre le critère. Ignore l'auto-rapport "
-            f"de l'agent : seul le contenu fait foi. "
-            f"verified=true SEULEMENT si le critère est RÉELLEMENT atteint d'après le "
-            f"contenu. En cas de doute, verified=false. Le fait que le fichier existe "
-            f"ou compile ne suffit JAMAIS.\n"
+            f"## Demande de l'utilisateur\n{project.mission}\n\n"
+            f"## Étapes réalisées (auto-rapport de l'agent — pas une preuve)\n"
+            f"{self._steps_summary(project)}\n\n"
+            f"## Journal des actions réellement effectuées (preuve)\n"
+            f"{self._journal_block(journal)}\n\n"
+            f"## Fichiers présents à la fin, avec leur contenu (preuve)\n"
+            f"{self._files_block(project.workspace_path)}\n\n"
+            f"## Contrôle qualité automatique\n{self._quality_block()}\n\n"
+            "## Ta décision\n"
+            "Juge la DEMANDE, pas la manière. Un programme correct écrit autrement que tu "
+            "l'aurais fait est correct. Un fichier absent parce que la demande disait de le "
+            "supprimer est un succès. Accepte si la demande est satisfaite. Refuse "
+            "SEULEMENT en citant ce qui manque ou est faux, preuve à l'appui (nom de "
+            "fichier, contenu, sortie de commande). Sans preuve d'un manque, accepte.\n"
+            "Réponds avec ce JSON exactement :\n"
+            '{"accepted": true|false, "missing": ["..."], "reason": "une phrase"}\n'
         )
-        try:
-            raw = await self._llm.complete(
-                messages=[{"role": "user", "content": prompt}],
-                system=_SEMANTIC_SYSTEM,
-                stream=False,
-                context="verifier",
-            )
-        except Exception as exc:  # noqa: BLE001 — erreur LLM = doute = verified=false
-            collector.error("JRV-MSN-001", "JRV-MSN-001", cause=exc)
-            logger.warning("Verifier couche 3 — erreur LLM", error=str(exc))
-            return VerificationResult(
-                verified=False,
-                layer="semantic",
-                issues=[f"erreur LLM: {exc}"],
-                notes="Appel LLM grader a échoué — verdict prudent",
-            )
-
-        if not isinstance(raw, str):
-            return VerificationResult(
-                verified=False,
-                layer="semantic",
-                issues=["réponse LLM non textuelle"],
-                notes="Type de réponse inattendu — doute",
-            )
-
-        verdict = self._parse_verdict(raw)
-        if verdict is None:
-            return VerificationResult(
-                verified=False,
-                layer="semantic",
-                issues=["verdict LLM non parsable"],
-                notes=f"JSON illisible — verdict prudent (raw[:200]: {raw[:200]!r})",
-            )
-
-        # Strictement : verified=true SEULEMENT si la clé est explicitement True (bool).
-        # Un "True", "yes", 1, ou clé absente → false par défaut.
-        verified_raw = verdict.get("verified")
-        verified = verified_raw is True
-        return VerificationResult(
-            verified=verified,
-            layer="semantic",
-            issues=[str(i) for i in (verdict.get("issues") or [])][:10],
-            notes=str(verdict.get("notes") or "")[:500],
+        for attempt in (1, 2):  # une seconde chance si la reponse est illisible
+            try:
+                raw = await self._llm.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    system=_ACCEPT_SYSTEM,
+                    stream=False,
+                    context="mission-acceptance",
+                )
+            except Exception as exc:  # noqa: BLE001 — l'erreur LLM est rapportee telle quelle
+                collector.error("JRV-MSN-001", "JRV-MSN-001", cause=exc)
+                return Acceptance(
+                    accepted=False, reason=f"recette impossible : {exc}", judged=False
+                )
+            verdict = _parse_json(raw if isinstance(raw, str) else "")
+            if verdict is not None:
+                missing = [str(m) for m in (verdict.get("missing") or [])][:10]
+                return Acceptance(
+                    accepted=verdict.get("accepted") is True,
+                    reason=" ".join(str(verdict.get("reason") or "").split())[:300],
+                    missing=missing,
+                )
+            logger.warning(f"Recette : réponse illisible (essai {attempt}/2)")
+        return Acceptance(
+            accepted=False, reason="recette impossible : réponse du juge illisible", judged=False
         )
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Preuves ───────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _parse_verdict(raw: str) -> dict | None:
-        """Parse JSON strict. Retourne None si non parsable ou format inattendu."""
-        clean = raw.strip()
-        # Retire les fences markdown ```json ... ```
-        if clean.startswith("```"):
-            first_newline = clean.find("\n")
-            if first_newline != -1:
-                clean = clean[first_newline + 1 :]
-            if clean.endswith("```"):
-                clean = clean[:-3]
-            clean = clean.strip()
-        try:
-            parsed = json.loads(clean)
-        except json.JSONDecodeError:
-            collector.error("JRV-MSN-001", "JRV-MSN-001")
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        return parsed
+    def _steps_summary(project: Project) -> str:
+        lines = []
+        for s in project.steps:
+            output = " ".join(str(s.output or "").split())[:160]
+            lines.append(f"- [{s.status}] {s.title} — {output}")
+        return "\n".join(lines) or "(aucune étape)"
 
-    def _workspace_summary(self) -> str:
-        """Liste compacte des fichiers du workspace (top 20)."""
+    @staticmethod
+    def _journal_block(journal: list[LogEntry]) -> str:
+        """Actions reelles, dont les SUPPRESSIONS et les SORTIES de commandes.
+
+        L'ancien juge ne voyait que les fichiers nouveaux : une suppression reussie
+        etait indiscernable d'un oubli (proj_e7b565).
+        """
+        rows = []
+        for entry in journal:
+            if entry.level not in _EVIDENCE_LEVELS:
+                continue
+            line = f"- [{entry.level}] {entry.message}"
+            data = entry.data if isinstance(entry.data, dict) else {}
+            if "returncode" in data:
+                sortie = " ".join(str(data.get("output") or "").split())[:300]
+                line += f" → code {data['returncode']}" + (f", sortie : {sortie}" if sortie else "")
+            rows.append(line)
+        return "\n".join(rows[-_MAX_JOURNAL:]) or "(aucune action enregistrée)"
+
+    def _files_block(self, workspace_path: str) -> str:
         files = self._quality.list_all_files()
         if not files:
             return "(workspace vide)"
-        lines = [f"- {f['path']} ({f['size']}B)" for f in files[:20]]
-        if len(files) > 20:
-            lines.append(f"... +{len(files) - 20} autres fichiers")
-        return "\n".join(lines)
-
-    def _new_files_with_content(
-        self,
-        workspace_path: str,
-        files_before: list[str],
-    ) -> str:
-        """Renvoie le contenu (tronqué) des fichiers créés/modifiés depuis files_before.
-
-        Le grader sémantique a besoin du contenu réel — pas seulement de la liste — pour
-        juger si le critère est atteint. Sans ça, il ne peut pas distinguer un artefact
-        plausible d'un artefact réel.
-        """
-        files_now = self._quality.list_all_files()
-        before_set = set(files_before)
-        new_or_modified = [f for f in files_now if f["path"] not in before_set]
-        if not new_or_modified:
-            return "(aucun fichier nouveau ou modifié)"
-
-        # Limite raisonnable : fichiers de texte uniquement (skip binaires lourds).
         ws = Path(workspace_path).resolve()
-        text_exts = {
-            ".html",
-            ".css",
-            ".js",
-            ".ts",
-            ".py",
-            ".json",
-            ".md",
-            ".txt",
-            ".yaml",
-            ".yml",
-            ".toml",
-            ".xml",
-            ".sh",
-            ".csv",
-        }
-
-        parts: list[str] = []
-        used = 0
-        included = 0
-        for f in new_or_modified:
-            if included >= _MAX_FILES_INCLUDED:
-                parts.append(
-                    f"\n[... +{len(new_or_modified) - included} fichiers tronqués "
-                    "pour limite tokens]"
-                )
-                break
+        parts, used = [], 0
+        for f in files[:_MAX_FILES]:
             path = f["path"]
-            if Path(path).suffix.lower() not in text_exts:
-                parts.append(f"\n=== {path} ({f['size']}B, binaire — skipé) ===")
-                included += 1
+            if Path(path).suffix.lower() not in _TEXT_EXTS:
+                parts.append(f"=== {path} ({f['size']} o, binaire) ===")
                 continue
             try:
                 content = (ws / path).read_text(encoding="utf-8", errors="replace")
-            except Exception as exc:  # noqa: BLE001
+            except OSError as exc:
                 collector.error("JRV-MSN-001", "JRV-MSN-001", cause=exc)
-                parts.append(f"\n=== {path} (illisible: {exc}) ===")
-                included += 1
+                parts.append(f"=== {path} (illisible : {exc}) ===")
                 continue
-            remaining = _MAX_CONTENT_CHARS - used
-            if remaining < 300:
-                parts.append(
-                    f"\n[... +{len(new_or_modified) - included} fichiers tronqués "
-                    "pour limite tokens]"
-                )
-                break
-            truncated = content[:remaining]
-            parts.append(f"\n=== {path} ({f['size']}B) ===\n{truncated}")
-            if len(content) > remaining:
-                parts.append(f"\n[... fichier tronqué à {remaining} chars / {len(content)}]")
-            used += len(truncated)
-            included += 1
+            room = max(0, _MAX_CONTENT_CHARS - used)
+            parts.append(f"=== {path} ({f['size']} o) ===\n{content[:room]}")
+            used += min(len(content), room)
+        if len(files) > _MAX_FILES:
+            parts.append(f"(+{len(files) - _MAX_FILES} autres fichiers)")
+        return "\n".join(parts)
 
-        return "\n".join(parts) if parts else "(aucun fichier texte à examiner)"
+    def _quality_block(self) -> str:
+        report = self._quality.generate_report()
+        issues = report.get("issues") or []
+        return "\n".join(f"- {i}" for i in issues[:10]) or "(aucun problème détecté)"
+
+
+def _parse_json(raw: str) -> dict | None:
+    """Extrait l'objet JSON de la reponse, meme entoure d'une cloture markdown."""
+    text = raw.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if not 0 <= start < end:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        collector.error("JRV-MSN-001", "JRV-MSN-001")
+        return None
+    return parsed if isinstance(parsed, dict) else None

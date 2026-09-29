@@ -235,15 +235,10 @@ async def test_step_non_verifie_bloque_progression(tmp_path: Path) -> None:
             def __init__(self) -> None:
                 pass  # pas d'init parent
 
-            async def verify(
-                self, project: Project, step: Step, files_before: list[str]
-            ) -> VerificationResult:
-                return VerificationResult(
-                    verified=False,
-                    layer="semantic",
-                    issues=["fake failure"],
-                    notes="Toujours faux",
-                )
+            def check_step(self) -> VerificationResult:
+                # Un défaut OBJECTIF qui ne se corrige pas : seul cas qui arrête
+                # désormais une étape (et donc la suite de la mission).
+                return VerificationResult(verified=False, issues=["Fichier vide : x.txt"])
 
         # Approval callback : refuse tout (ne devrait pas être appelé ici car gate=auto)
         async def _approval_cb(pid: str, sid: str, desc: str) -> bool:
@@ -284,7 +279,7 @@ async def test_step_non_verifie_bloque_progression(tmp_path: Path) -> None:
         assert reloaded is not None
         assert reloaded.status == ProjectStatus.FAILED
         assert reloaded.steps[0].status == StepStatus.FAILED
-        assert "Vérification" in (reloaded.steps[0].error or "")
+        assert "Fichier vide" in (reloaded.steps[0].error or "")
         assert reloaded.steps[1].status == StepStatus.PENDING
         assert reloaded.steps[2].status == StepStatus.PENDING
 

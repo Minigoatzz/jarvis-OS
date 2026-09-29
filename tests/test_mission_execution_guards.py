@@ -194,9 +194,10 @@ def test_un_refus_definitif_dit_au_modele_de_ne_pas_reessayer() -> None:
 
 
 def test_la_cause_reelle_remonte_dans_l_erreur_du_step() -> None:
-    """« trop d'etapes » est un symptome de boucle, pas un diagnostic."""
+    """« trop d'etapes » est un symptome de boucle, pas un diagnostic : un refus de
+    politique rencontre pendant l'etape prime dans l'erreur finale."""
     source = (_MISSION / "worker_agent.py").read_text(encoding="utf-8")
-    assert "step.error += \" — cause : \" + \" | \".join(self._blockers)" in source
+    assert "cause = self._blockers or issues" in source
 
 
 # ── 5. Le planificateur ne planifie plus a l'aveugle ────────────────────────
@@ -204,12 +205,14 @@ def test_la_cause_reelle_remonte_dans_l_erreur_du_step() -> None:
 
 def test_le_planificateur_connait_la_boite_a_outils() -> None:
     prompt = (_MISSION / "project_manager.py").read_text(encoding="utf-8")
-    assert "Boîte à outils RÉELLE" in prompt
+    assert "Boîte à outils de l'agent" in prompt
     assert "execute_cli" in prompt
 
 
 def test_le_planificateur_ne_propose_plus_une_commande_que_le_worker_refuse() -> None:
     """Le depot suggerait « python3 -c 'import script' » — interdit par worker_cli:135."""
     prompt = (_MISSION / "project_manager.py").read_text(encoding="utf-8")
-    assert "\"python3 -c 'import script'\"" not in prompt
-    assert "INTERDIT : python3 -c" in prompt
+    assert "python3 -c" not in prompt
+    # Il n'y a plus de commande de verification a proposer : la contradiction
+    # (le prompt suggerait une commande que worker_cli refuse) ne peut plus naitre.
+    assert "verification_command" not in prompt

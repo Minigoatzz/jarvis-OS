@@ -25,7 +25,7 @@ from jarvis.engine.mission.project_store import ProjectStore
 from jarvis.engine.mission.quality_checker import QualityChecker
 from jarvis.engine.mission.reflexion import Reflexion
 from jarvis.engine.mission.schemas import LogEntry, Project, ProjectStatus, Step, StepStatus
-from jarvis.engine.mission.verifier import Verifier
+from jarvis.engine.mission.verifier import Acceptance, Verifier
 from jarvis.engine.mission.worker_cli import WorkerCLITool
 from jarvis.engine.vocab import AccessLevel
 from jarvis.kernel.approvals import approval_config
@@ -40,7 +40,8 @@ from jarvis.kernel.subprocess_compat import describe_exception
 # ── Constantes PHASE 1 ─────────────────────────────────────────────────────────
 
 # Nombre maximum de tentatives de vérification d'un step (CDC §4.4).
-_VERIFICATION_MAX_RETRIES = 2
+# Essais par étape quand un défaut OBJECTIF est constaté.
+_STEP_ATTEMPTS = 2
 
 # Mapping outil → (AccessLevel, action_category) pour le gate au niveau tool (Q3=c, §9).
 # Catégorie par défaut "agent_mission" : la mission est l'enveloppe sémantique du worker.
@@ -268,8 +269,6 @@ class WorkerAgent:
         self._docker = None
         self._killed = False
         self._quality = QualityChecker(project.workspace_path)
-        self._pending_issues: list[str] = []
-        self._files_snapshot: list[str] = []
         # Refus de POLITIQUE rencontrés pendant l'étape courante (backend absent,
         # commande hors whitelist, garde de script). Ils portent la vraie cause
         # d'un échec ; sans eux l'utilisateur ne lit que « trop d'étapes ».
@@ -309,12 +308,7 @@ class WorkerAgent:
         if self._verifier is not None:
             return
 
-        self._verifier = Verifier(
-            quality_checker=self._quality,
-            llm=self._llm,
-            cli_executor=self._cli_tool.execute,
-            workspace_path=self._project.workspace_path,
-        )
+        self._verifier = Verifier(quality_checker=self._quality, llm=self._llm)
 
     async def _setup_environment(self) -> None:
         """Configure l'environnement d'exécution : Docker V2 ou direct V1."""
@@ -403,21 +397,17 @@ class WorkerAgent:
                     # `finally` sauvegarde et pousse la mise à jour : pas de
                     # double enregistrement ici.
                     return
-                project.status = ProjectStatus.DONE
+                # La recette : la DEMANDE est-elle satisfaite ? Seule porte finale.
+                verdict = await self._run_acceptance()
                 project.completed_at = datetime.now()
-                report = self._quality.generate_report()
-                if report["valid"]:
-                    await self._log(
-                        "info",
-                        f"✓ Qualité finale : {len(report['files'])} fichier(s), aucun problème",
+                if not verdict.accepted:
+                    project.status = ProjectStatus.FAILED
+                    manques = "; ".join(verdict.missing[:3])
+                    self._failure_reason = f"recette refusée — {verdict.reason}" + (
+                        f" ({manques})" if manques else ""
                     )
-                else:
-                    await self._log(
-                        "warning",
-                        f"Qualité finale : {len(report['issues'])} problème(s) détecté(s)",
-                    )
-                    for issue in report["issues"][:5]:
-                        await self._log("warning", issue)
+                    return
+                project.status = ProjectStatus.DONE
                 await self._log("info", "✓ Projet terminé avec succès")
                 self._broadcast(
                     {
@@ -573,21 +563,26 @@ class WorkerAgent:
         self._store.save_project(self._project)
         self._push_update()
 
-    async def _execute_with_verification(self, step: Step) -> None:
-        """Exécute le step puis le vérifie avec retry borné (CDC §4.4)."""
-        is_fusion = (
-            "fusion" in self._project.mission.lower() or "fusion" in self._project.title.lower()
-        )
-        prev_issues: list[str] = []
-        self._blockers = []
-        # Raison du dernier refus de vérification, pour l'erreur finale.
-        last_reason: str | None = None
+    def _is_fusion(self) -> bool:
+        """Mission Fusion 360 : le résultat vit dans Fusion, pas dans le workspace."""
+        text = f"{self._project.mission} {self._project.title}".lower()
+        return "fusion" in text
 
-        for attempt in range(_VERIFICATION_MAX_RETRIES):
-            self._files_snapshot = self._file_tool.list_files()
+    async def _execute_with_verification(self, step: Step) -> None:
+        """Exécute une étape. Seul un défaut OBJECTIF la fait échouer.
+
+        Une étape est un progrès, pas un verdict. On ne vérifie ici que ce qui doit
+        être vrai à tout moment (aucun fichier vide, Python valide) ; savoir si la
+        DEMANDE est satisfaite revient à la recette de fin de mission (_accept).
+        Juger chaque étape sur son texte faisait mourir des missions correctes.
+        """
+        issues: list[str] = []
+        self._blockers = []
+
+        for attempt in range(_STEP_ATTEMPTS):
             try:
                 result = await asyncio.wait_for(
-                    self._run_step_llm(step, prev_issues=prev_issues, attempt=attempt),
+                    self._run_step_llm(step, prev_issues=issues, attempt=attempt),
                     timeout=300,
                 )
                 step.output = result
@@ -625,67 +620,27 @@ class WorkerAgent:
                 await self._log("error", f"Erreur : {step.title} — {e}", step_id=step.id)
                 return
 
-            # Vérification — fusion exclu (pas de fichiers à vérifier au quality check)
-            if is_fusion or self._verifier is None:
+            check = self._verifier.check_step() if self._verifier else None
+            if self._is_fusion() or check is None or check.verified:
                 step.status = StepStatus.DONE
-                step.verified = True
+                step.verified = check is not None and check.verified
                 step.completed_at = datetime.now()
                 await self._log(
                     "info", f"✓ {step.title}", step_id=step.id, data={"output": result[:300]}
                 )
                 return
 
-            verdict = await self._verifier.verify(self._project, step, self._files_snapshot)
-            if verdict.verified:
-                step.status = StepStatus.DONE
-                # `unverified` : l'étape passe, mais elle n'est pas cochée comme
-                # vérifiée — on ne s'attribue pas un contrôle qu'on n'a pas fait.
-                step.verified = not verdict.unverified
-                step.completed_at = datetime.now()
-                step.verification_notes = (verdict.notes or "")[:500]
-                await self._log(
-                    "warning" if verdict.unverified else "info",
-                    f"{'~ Non vérifié' if verdict.unverified else '✓ Vérifié'} "
-                    f"[{verdict.layer}] : {step.title}",
-                    step_id=step.id,
-                    data={"layer": verdict.layer, "notes": verdict.notes[:300]},
-                )
-                return
-
-            # Non vérifié — préparer un nouvel essai (s'il en reste un)
-            prev_issues = verdict.issues
-            last_reason = verdict.notes
-            step.verification_notes = (
-                f"[{attempt + 1}/{_VERIFICATION_MAX_RETRIES}] [{verdict.layer}] {verdict.notes}"
-            )[:500]
-            self._pending_issues.extend(verdict.issues)
+            issues = check.issues
             await self._log(
                 "warning",
-                (
-                    f"Vérif. échouée [{verdict.layer}] "
-                    f"try {attempt + 1}/{_VERIFICATION_MAX_RETRIES} : {verdict.notes}"
-                ),
+                f"Défaut objectif, essai {attempt + 1}/{_STEP_ATTEMPTS} : {'; '.join(issues[:3])}",
                 step_id=step.id,
-                data={"issues": verdict.issues[:5]},
             )
 
-        # Tous les essais épuisés sans vérification — step FAILED, mission FAILED.
         step.status = StepStatus.FAILED
-        step.error = f"Vérification non concluante après {_VERIFICATION_MAX_RETRIES} essais"
-        if self._blockers:
-            # La vraie cause, pas le symptôme. Sans ça l'écran affiche
-            # « trop d'étapes » et le blocage réel reste invisible.
-            step.error += " — cause : " + " | ".join(self._blockers)
-        elif last_reason:
-            # Sans refus de politique, la cause est ce que le vérificateur a
-            # constaté. proj_e7b565 : il avait écrit « notes2.txt n'a pas été
-            # supprimé », et l'utilisateur ne lisait que « non concluante ».
-            step.error += " — " + " ".join(last_reason.split())[:300]
-        await self._log(
-            "error",
-            f"Step FAILED — vérification non concluante : {step.title}",
-            step_id=step.id,
-        )
+        cause = self._blockers or issues
+        step.error = "Défaut non corrigé : " + " | ".join(cause[:3])
+        await self._log("error", f"Étape échouée : {step.title}", step_id=step.id)
 
     async def _gate_step(self, step: Step) -> GateDecision:
         """Appelle le gate composite pour ce step (§4.5)."""
@@ -744,21 +699,10 @@ class WorkerAgent:
             f"Exécute cette étape avec les outils disponibles et retourne un résumé concis."
         )
 
-        # Feedback du verifier au retry : on injecte les issues de l'essai précédent.
+        # Seconde chance : les défauts OBJECTIFS constatés au premier essai.
         if attempt > 0 and prev_issues:
             issues_text = "\n".join(f"  • {i}" for i in prev_issues[:5])
-            prompt += (
-                f"\n\nL'essai précédent N'A PAS atteint le critère. "
-                f"Problèmes signalés par le vérificateur (à corriger) :\n{issues_text}"
-            )
-        # Issues héritées des steps PRÉCÉDENTS (qualité non bloquante)
-        elif self._pending_issues:
-            issues_text = "\n".join(f"  • {i}" for i in self._pending_issues[-5:])
-            prompt += (
-                f"\n\nProblèmes qualité détectés aux étapes précédentes "
-                f"(à corriger si pertinent) :\n{issues_text}"
-            )
-            self._pending_issues.clear()
+            prompt += f"\n\nL'essai précédent a laissé ces défauts, à corriger :\n{issues_text}"
 
         if _QUALITY_RULES:
             system += f"\n\n{_QUALITY_RULES}"
@@ -826,8 +770,17 @@ class WorkerAgent:
             if name == "execute_cli":
                 cmd = inputs["command"]
                 timeout = int(inputs.get("timeout", 60))
-                await self._log("tool", f"execute_cli: {cmd[:60]}")
                 res = await self._cli_tool.execute(cmd, timeout=timeout)
+                # Consigné APRÈS exécution, avec code et sortie : c'est la preuve
+                # la plus solide qu'un programme a tourné, et la recette la lit.
+                await self._log(
+                    "tool",
+                    f"execute_cli: {cmd[:120]}",
+                    data={
+                        "returncode": res.get("returncode"),
+                        "output": ((res.get("stdout") or "") + (res.get("stderr") or ""))[:600],
+                    },
+                )
                 if res["success"]:
                     return res["stdout"] or "(commande exécutée, pas de sortie)"
                 if res.get("blocked"):
@@ -890,6 +843,53 @@ class WorkerAgent:
         self._store.save_project(project)
         self._push_update()
         self._announce_finished()
+
+    async def _run_acceptance(self) -> Acceptance:
+        """Recette de fin de mission, avec UNE ronde de correction au besoin.
+
+        Le juge voit la demande, chaque fichier et son contenu, et le journal des
+        actions (écritures, suppressions, commandes et leurs sorties). S'il refuse
+        preuve à l'appui, une étape « Corriger d'après la recette » — visible dans
+        le dashboard — reçoit ses manques précis, puis la recette est rejouée une
+        fois. Un Retry refait une recette (et au besoin une nouvelle correction).
+        """
+        if self._is_fusion() or self._verifier is None:
+            return Acceptance(accepted=True, reason="recette non applicable")
+
+        await self._log("info", "Recette : la demande est-elle satisfaite ?")
+        verdict = await self._verifier.accept(self._project, self._store.get_logs(self._project))
+        if verdict.accepted or not verdict.judged:
+            await self._log("info" if verdict.accepted else "error", f"Recette : {verdict.reason}")
+            return verdict
+
+        await self._log(
+            "warning", f"Recette refusée : {verdict.reason}", data={"missing": verdict.missing}
+        )
+        repair = self._repair_step(verdict)
+        self._project.steps.append(repair)
+        self._store.save_project(self._project)
+        self._push_update()
+        await self._execute_step(repair)
+        if repair.status is not StepStatus.DONE:
+            return Acceptance(accepted=False, reason=repair.error or verdict.reason)
+
+        verdict = await self._verifier.accept(self._project, self._store.get_logs(self._project))
+        await self._log("info" if verdict.accepted else "error", f"Recette : {verdict.reason}")
+        return verdict
+
+    def _repair_step(self, verdict: Acceptance) -> Step:
+        """Étape de correction ciblée sur les manques CITÉS par la recette."""
+        manques = "; ".join(verdict.missing) or verdict.reason
+        return Step(
+            id=f"step_{len(self._project.steps) + 1:03d}",
+            title="Corriger d'après la recette",
+            description=(
+                f"La vérification finale a refusé la mission : {verdict.reason} "
+                f"Corrige précisément ces manques : {manques}. "
+                f"Ne refais pas ce qui est déjà correct."
+            ),
+            success_criterion="Les manques signalés par la recette sont corrigés.",
+        )
 
     def _announce_finished(self) -> None:
         """Annonce la fin de mission — succès, échec ou arrêt — une seule fois.
