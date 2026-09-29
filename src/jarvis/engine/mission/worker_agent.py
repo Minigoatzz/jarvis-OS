@@ -50,6 +50,7 @@ _TOOL_ACCESS_LEVEL: dict[str, AccessLevel] = {
     "list_files": AccessLevel.READ_ONLY,
     "write_file": AccessLevel.WRITE_LOCAL,
     "create_directory": AccessLevel.WRITE_LOCAL,
+    "delete_file": AccessLevel.WRITE_LOCAL,
     "execute_cli": AccessLevel.EXECUTE_CODE,
     "fusion_360": AccessLevel.WRITE_LOCAL,
 }
@@ -58,6 +59,9 @@ _TOOL_CATEGORY: dict[str, str] = {
     "list_files": "agent_mission",
     "write_file": "agent_mission",
     "create_directory": "agent_mission",
+    # file_delete vaut ASK par défaut (kernel/approvals.py) et le gate retient la
+    # décision la plus restrictive : chaque suppression te demande ton accord.
+    "delete_file": "file_delete",
     "execute_cli": "agent_mission",
     "fusion_360": "agent_mission",
 }
@@ -77,7 +81,10 @@ Outils disponibles :
 - write_file(path, content) : créer ou modifier un fichier
 - list_files(directory) : lister les fichiers (directory optionnel, défaut ".")
 - execute_cli(command, timeout?) : exécuter une commande shell (whitelist stricte)
-- create_directory(path) : créer un répertoire
+- create_directory(path) : créer un répertoire (jamais un nom de fichier)
+- delete_file(path) : supprimer un fichier — l'utilisateur doit l'approuver.
+  N'affirme JAMAIS qu'un fichier est supprimé sans avoir appelé delete_file
+  et reçu « Supprimé : … ». Si la suppression est refusée, dis-le.
 - fusion_360(action, ...) : contrôler Autodesk Fusion 360 (si le projet l'exige)
   - action="execute_script", script="..." : exécuter un script Python Fusion API
   - action="read", query_type="screenshot" : capturer la vue actuelle
@@ -154,6 +161,20 @@ _WORKER_TOOLS: list[dict] = [
                 "timeout": {"type": "integer", "default": 60},
             },
             "required": ["command"],
+        },
+    },
+    {
+        "name": "delete_file",
+        "description": (
+            "Supprimer un fichier du workspace. Demande l'approbation de l'utilisateur. "
+            "Ne supprime jamais un dossier."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Chemin relatif au workspace"}
+            },
+            "required": ["path"],
         },
     },
     {
@@ -559,6 +580,8 @@ class WorkerAgent:
         )
         prev_issues: list[str] = []
         self._blockers = []
+        # Raison du dernier refus de vérification, pour l'erreur finale.
+        last_reason: str | None = None
 
         for attempt in range(_VERIFICATION_MAX_RETRIES):
             self._files_snapshot = self._file_tool.list_files()
@@ -631,6 +654,7 @@ class WorkerAgent:
 
             # Non vérifié — préparer un nouvel essai (s'il en reste un)
             prev_issues = verdict.issues
+            last_reason = verdict.notes
             step.verification_notes = (
                 f"[{attempt + 1}/{_VERIFICATION_MAX_RETRIES}] [{verdict.layer}] {verdict.notes}"
             )[:500]
@@ -652,6 +676,11 @@ class WorkerAgent:
             # La vraie cause, pas le symptôme. Sans ça l'écran affiche
             # « trop d'étapes » et le blocage réel reste invisible.
             step.error += " — cause : " + " | ".join(self._blockers)
+        elif last_reason:
+            # Sans refus de politique, la cause est ce que le vérificateur a
+            # constaté. proj_e7b565 : il avait écrit « notes2.txt n'a pas été
+            # supprimé », et l'utilisateur ne lisait que « non concluante ».
+            step.error += " — " + " ".join(last_reason.split())[:300]
         await self._log(
             "error",
             f"Step FAILED — vérification non concluante : {step.title}",
@@ -778,6 +807,16 @@ class WorkerAgent:
                     data={"count": len(files)},
                 )
                 return json.dumps(files)
+
+            if name == "delete_file":
+                # Le gate ci-dessus demande l'approbation — s'il a tourné. Sans
+                # gouvernance, rien ne l'aurait demandé : on refuse plutôt que de
+                # supprimer sans accord.
+                if self._governance is None:
+                    raise ValueError("suppression impossible sans contrôle d'approbation actif")
+                result = self._file_tool.delete_file(inputs["path"])
+                await self._log("tool", f"delete_file: {inputs['path']}")
+                return result
 
             if name == "create_directory":
                 result = self._file_tool.create_directory(inputs["path"])

@@ -194,3 +194,48 @@ def test_le_planificateur_ne_plante_plus_sur_une_etape_mal_formee(etape: dict) -
 def test_le_planificateur_accepte_de_la_prose_autour_du_json() -> None:
     projet = _planifier('Voici le plan :\n' + json.dumps({"title": "T", "steps": [_step()]}))
     assert projet.title == "T"
+
+
+# ── Une verification qui ne peut pas echouer n'est pas une verification ─────
+
+
+@pytest.mark.parametrize(
+    "commande",
+    [
+        "test -f notes2.txt && echo 'existe' || echo 'supprimé'",  # proj_e7b565
+        "test -s out.txt || true",
+        "grep -q x f.txt; echo fini",
+        "echo ok",
+        "python3 s.py; exit 0",
+    ],
+)
+def test_une_tautologie_est_retiree_du_plan(commande: str) -> None:
+    from jarvis.engine.mission.plan_normalizer import is_tautological
+
+    assert is_tautological(commande)
+    plan = normalize_plan({"steps": [_step(verification_command=commande)]}, mission="m")
+    assert plan["steps"][0]["verification_command"] is None
+
+
+@pytest.mark.parametrize(
+    "commande",
+    [
+        "test -f notes1.txt && grep -c '^' notes1.txt",
+        "test -s RAPPORT.md && grep -c '^## ' RAPPORT.md | awk '{exit ($1 >= 3) ? 0 : 1}'",
+        "test -f index.html && echo trouve",
+        "! test -f notes2.txt",
+    ],
+)
+def test_une_vraie_verification_est_conservee(commande: str) -> None:
+    """Le filtre ne doit pas toucher la verification RAPPORT.md injectee par le moteur."""
+    plan = normalize_plan({"steps": [_step(verification_command=commande)]}, mission="m")
+    assert plan["steps"][0]["verification_command"] == commande
+
+
+def test_le_prompt_du_planificateur_porte_les_contre_exemples_du_jour() -> None:
+    from jarvis.engine.mission.project_manager import _PLANNING_SYSTEM as prompt
+
+    assert "UNE étape qui l'écrit EN ENTIER" in prompt
+    assert "RÉSULTAT OBSERVABLE" in prompt
+    assert "! test -f notes2.txt" in prompt
+    assert "delete_file" in prompt

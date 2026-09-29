@@ -77,6 +77,8 @@ fin d'une mission, écoute celui-là** : `project_done` ignore les échecs.
 | Changer le délai, le nettoyage ou les métriques d'un worker | `orchestrator._start_worker()` | Création, retry et reprise passent tous par là |
 | Réagir à la fin d'une mission | événement `project_finished` | Ou `MissionCompleted` sur le bus interne (`events.md`) |
 | Ajouter un backend d'exécution | `engine/mission/backends/` + `map_path()` | Chaque backend expose sa propre vue des chemins |
+| Donner un nouvel outil au worker | `worker_agent.py` : `_WORKER_TOOLS`, `_TOOL_ACCESS_LEVEL`, `_TOOL_CATEGORY`, branche dans `_tool_executor`, ligne dans `_WORKER_SYSTEM` | Les cinq, sinon l'outil est invisible, non gardé ou non exécuté. Une action destructrice va dans une catégorie ASK |
+| Changer ce qui compte comme vérification valide | `plan_normalizer.py` (`is_tautological`) et `verifier.py` | Les deux : le premier pour les nouveaux plans, le second pour les plans déjà enregistrés |
 
 ## 5. Invariants — à ne pas casser
 
@@ -86,9 +88,20 @@ fin d'une mission, écoute celui-là** : `project_done` ignore les échecs.
 3. **Un niveau d'accès illisible n'est jamais auto-exécuté** : il prend le premier niveau
    au-dessus de `AUTO_MAX_LEVEL`. Un nombre hors bornes est arrondi vers le haut.
 4. **Un échec du planificateur est annoncé** dans la conversation, jamais perdu dans un log.
+5. **Une vérification doit pouvoir échouer.** Une commande qui réussit quoi qu'il arrive
+   (`… || echo …`, `|| true`, `; echo` final) est retirée du plan et ignorée par le
+   vérificateur : elle validerait un travail non fait. Cf. `plan_normalizer.is_tautological`.
+6. **Un refus de vérification dit quelle commande et pourquoi** — au worker pour sa relance,
+   et à l'utilisateur dans l'erreur de l'étape. Une relance aveugle échoue à l'identique.
+7. **Toute suppression passe par ton approbation** : `delete_file` est rattaché à la catégorie
+   `file_delete` (ASK), et refusé si la gouvernance est absente.
 
 ## 6. Limites connues
 
+- **Vérifications écrites par le planificateur.** Elles restent produites par un LLM. Les
+  tautologies sont écartées automatiquement ; une vérification trop stricte (qui refuse un
+  travail correct) ne l'est pas — elle est seulement nommée, pour que la relance puisse s'y
+  conformer. Le prompt du planificateur porte les contre-exemples réels.
 - **Binaires POSIX sous Windows.** La whitelist de `worker_cli.py` (`touch`, `cat`, `ls`, `grep`…)
   vise macOS/Linux. Sous Windows ces commandes n'existent pas ; l'erreur les nomme désormais
   (`Commande introuvable : 'touch'`). Une mission qui n'écrit que via `write_file` n'est pas touchée.

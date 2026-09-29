@@ -177,3 +177,35 @@ def test_le_workspace_rpc_est_resolu_en_absolu() -> None:
     runner = ScriptRPCRunner(MagicMock(), MagicMock(), _pl.Path("memory_data/rpc_workspace"))
     assert runner._workspace.is_absolute()
     assert str(runner._workspace).count("rpc_workspace") == 1
+
+
+# ── Nom de fichier eloigne du verbe (28/09 au soir) ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "rédige un rapport sur ma semaine en 3 sections dans semaine.md",
+        "rédige un rapport sur ma semaine",
+        "écris un document de specs pour mon app",
+        "sauvegarde mes idées de chansons dans idees.md",
+    ],
+)
+def test_un_livrable_nomme_loin_du_verbe_part_en_mission(message: str) -> None:
+    """Le modele avait appele memory_write, un outil du chat : « fichier introuvable »."""
+    assert SpeedRouter.explicit_project(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "ouvre rapport.md",
+        "résume ce document",
+        "prépare le café",
+        "écris un email à Paul",
+        "génère une image de chat",
+        "crée une note. Ensuite lis config.json",
+    ],
+)
+def test_le_fichier_d_une_autre_phrase_ne_compte_pas(message: str) -> None:
+    assert not SpeedRouter.explicit_project(message)

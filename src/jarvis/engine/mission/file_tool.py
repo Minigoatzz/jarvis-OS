@@ -106,12 +106,24 @@ class SandboxedFileTool:
         return files
 
     def delete_file(self, path: str) -> str:
+        """Supprime UN fichier du workspace. Jamais un dossier, jamais un fichier interne.
+
+        Exposé au worker (outil delete_file, catégorie file_delete → approbation).
+        _safe_path confine au workspace, mais .jarvis/state.json et le journal y
+        sont aussi : sans ce garde, le worker aurait pu effacer son propre état.
+        """
         target = self._safe_path(path)
-        if target.exists():
-            target.unlink()
-            logger.info("Sandbox delete", path=path)
-            return f"Supprimé : {path}"
-        return f"Fichier inexistant : {path}"
+        if _is_internal(target.relative_to(self._workspace)):
+            raise ValueError(f"« {path} » est un fichier interne de Jarvis : suppression refusée.")
+        if not target.exists():
+            return f"Fichier inexistant : {path}"
+        if target.is_dir():
+            raise ValueError(
+                f"« {path} » est un dossier : delete_file ne supprime que des fichiers."
+            )
+        target.unlink()
+        logger.info("Sandbox delete", path=path)
+        return f"Supprimé : {path}"
 
     def create_directory(self, path: str) -> str:
         target = self._safe_path(path)

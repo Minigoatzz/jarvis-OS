@@ -153,7 +153,9 @@ async def test_couche2_command_rc_non_nul_bloque_avant_llm(tmp_path: Path) -> No
     assert result.verified is False
     assert result.layer == "deterministic"
     assert llm.calls == 0
-    assert any("rc=1" in i for i in result.issues)
+    # Le message nomme désormais la commande en plus du code de retour : le
+    # worker ne pouvait pas corriger un échec dont il ignorait la commande.
+    assert any("pytest -x" in i and "code de retour 1" in i for i in result.issues)
 
 
 async def test_couche2_command_exception_bloque(tmp_path: Path) -> None:

@@ -32,6 +32,7 @@ Règles générales :
 
 Boîte à outils RÉELLE de l'agent — ne planifie RIEN qui en sorte :
 - read_file / write_file / list_files / create_directory, tous relatifs au workspace
+- delete_file : supprimer un fichier — l'utilisateur doit approuver chaque suppression
 - execute_cli, limité à une whitelist : python, node, npm, git (sans push ni commit),
   pip install, mkdir, cp, mv, ls, cat, head, tail, grep, find, wc, echo, sed, awk,
   test, diff, sort, uniq, curl -s, wget, ffmpeg, zip, unzip, pandoc
@@ -47,6 +48,10 @@ Règles qualité obligatoires :
   qu'un plan de 7 qui meurt à la deuxième.
 - Une seule étape « exécuter et vérifier la sortie » suffit pour un script :
   ne sépare pas « tester », « exécuter », « re-tester » en trois étapes.
+- UN script = UNE étape qui l'écrit EN ENTIER (toutes ses fonctions ET son code
+  principal), puis UNE étape qui l'exécute. Jamais « écrire la fonction X »,
+  « écrire la fonction Y », « ajouter le code principal » en étapes séparées :
+  c'est le même fichier, découpé en morceaux vérifiés un par un.
 - Ajoute une étape de test final avant la livraison
 
 Types de projet :
@@ -91,6 +96,17 @@ Règles verification_command (facultatif, exit 0 = succès) :
 - INTERDIT : python3 -c "..." et toute commande contenant des guillemets autour
   de code Python — la couche de sécurité du worker les refuse systématiquement,
   la vérification échouerait quoi qu'il arrive.
+- Teste le RÉSULTAT OBSERVABLE (le fichier existe, la sortie contient la bonne
+  valeur), JAMAIS le texte exact du code. Mauvais :
+      grep -E 'print\\(generate_primes\\(100\\)' script.py
+  Le même programme s'écrit de dix façons (« primes = generate_primes(100) » puis
+  « print(primes) ») : cette vérification rejette un script correct.
+- INTERDIT : « || echo », « || true », « ; echo » en fin de commande. Mauvais :
+      test -f notes2.txt && echo 'existe' || echo 'supprimé'
+  Elle réussit dans les deux cas : elle ne vérifie rien et valide un travail
+  non fait. Pour vérifier une absence : « ! test -f notes2.txt ».
+- Pour compter des lignes : « grep -c '^' fichier ». « wc -l fichier » affiche
+  aussi le nom du fichier, et « wc -l f | grep -E '100$' » ne correspond jamais.
 - Vide ou null si pas de commande déterministe
 
 Règles access_level (entier 0-5, par défaut 1) :

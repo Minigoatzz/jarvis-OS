@@ -105,3 +105,34 @@ def test_le_dashboard_n_affiche_plus_un_fichier_comme_un_dossier() -> None:
     js = pathlib.Path("src/jarvis/interfaces/ui/static/dashboard.js").read_text(encoding="utf-8")
     ligne = next(l for l in js.splitlines() if "mp-file-icon" in l)
     assert "📁" not in ligne
+
+
+# ── delete_file, desormais expose au worker ─────────────────────────────────
+
+
+def test_delete_file_supprime_un_fichier() -> None:
+    ws = _workspace()
+    (ws / "notes2.txt").write_text("x")
+    SandboxedFileTool(str(ws)).delete_file("notes2.txt")
+    assert not (ws / "notes2.txt").exists()
+
+
+def test_delete_file_refuse_les_fichiers_internes() -> None:
+    """Sans ce garde, le worker aurait pu effacer son propre etat."""
+    import pytest
+
+    ws = _workspace()
+    (ws / ".jarvis").mkdir()
+    (ws / ".jarvis" / "state.json").write_text("{}")
+    with pytest.raises(ValueError, match="interne"):
+        SandboxedFileTool(str(ws)).delete_file(".jarvis/state.json")
+    assert (ws / ".jarvis" / "state.json").exists()
+
+
+def test_delete_file_refuse_un_dossier() -> None:
+    import pytest
+
+    ws = _workspace()
+    (ws / "rapport").mkdir()
+    with pytest.raises(ValueError, match="dossier"):
+        SandboxedFileTool(str(ws)).delete_file("rapport")

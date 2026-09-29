@@ -44,6 +44,20 @@ _UNREADABLE_ACCESS = AccessLevel(min(int(AUTO_MAX_LEVEL) + 1, max(AccessLevel)))
 
 _TRUE = {"true", "vrai", "oui", "yes", "1"}
 
+# Commandes qui ne peuvent PAS échouer : leur code de retour est celui d'une
+# commande qui réussit toujours. proj_e7b565 (28/09) : l'étape « Supprimer
+# notes2.txt » était vérifiée par
+#     test -f notes2.txt && echo 'existe' || echo 'est supprimé'
+# qui rend 0 dans les deux cas. Le worker, sans outil de suppression, a affirmé
+# l'avoir fait ; la vérification a validé le mensonge ; notes2.txt était encore là.
+_ALWAYS_OK = r"(?:echo|printf|true|:|exit\s+0)\b"
+_TAUTOLOGY_RE = re.compile(
+    rf"\|\|\s*{_ALWAYS_OK}"          # … || echo …   : la branche d'échec réussit
+    rf"|;\s*{_ALWAYS_OK}[^;&|]*$"      # … ; echo …    : le dernier statut est celui d'echo
+    rf"|^\s*{_ALWAYS_OK}"              # echo …        : ne teste rien
+    r"|\bexit\s+0\s*$",              # … exit 0
+)
+
 
 class PlanError(ValueError):
     """Plan inexploitable. Le message est destine a l'utilisateur, tel quel."""
@@ -112,6 +126,16 @@ def as_access_level(value: object) -> AccessLevel:
     return AccessLevel(clamped)
 
 
+def is_tautological(command: str | None) -> bool:
+    """Vrai si la commande de vérification réussit quoi qu'il arrive.
+
+    Une telle commande n'est pas une vérification : elle valide tout, y compris
+    un travail qui n'a pas été fait. On la retire du plan — l'étape reste alors
+    jugée par les couches structurelle et sémantique, qui ne sont pas dupes.
+    """
+    return bool(command) and bool(_TAUTOLOGY_RE.search(command))
+
+
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -138,6 +162,8 @@ def normalize_plan(data: dict[str, Any], *, mission: str) -> dict[str, Any]:
         if not title:
             continue  # une etape sans titre ni description ne decrit rien
         verification = _text(item.get("verification_command"))
+        if is_tautological(verification):
+            verification = ""  # ne peut pas échouer : ce n'est pas un test
         steps.append(
             {
                 "id": _text(item.get("id")),

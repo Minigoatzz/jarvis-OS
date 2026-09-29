@@ -23,6 +23,7 @@ from pathlib import Path
 from loguru import logger
 
 from jarvis.engine.mission.native_checks import evaluate
+from jarvis.engine.mission.plan_normalizer import is_tautological
 from jarvis.engine.mission.quality_checker import QualityChecker
 from jarvis.engine.mission.schemas import Project, Step
 from jarvis.kernel.contracts import LLMProvider
@@ -55,6 +56,21 @@ _SEMANTIC_SYSTEM = (
     "de succès, pas seulement s'il existe ou compile. Tu réponds UNIQUEMENT en JSON, "
     "sans markdown, sans commentaire, sans préambule."
 )
+
+
+def _failed_check_issue(command: str | None, detail: str) -> str:
+    """Consigne de relance quand la vérification déterministe échoue.
+
+    Le worker recevait « 0 ligne(s) correspondent au motif » — sans le motif,
+    sans la commande. proj_b67093 (28/09) : le script était correct, mais la
+    vérification exigeait le texte littéral « print(generate_primes(100)) » ;
+    le worker ignorait ce qu'on attendait de lui, et ses deux relances ont
+    échoué de la même façon. La relance n'a de sens que si elle sait QUOI viser.
+    """
+    return (
+        f"La vérification « {command} » a échoué : {detail}. "
+        f"Modifie le travail pour que cette commande réussisse telle quelle."
+    )
 
 
 class Verifier:
@@ -101,8 +117,14 @@ class Verifier:
         if not structural.verified:
             return structural
 
-        # Couche 2
-        if step.verification_command and (self._cli is not None or self._workspace is not None):
+        # Couche 2 — sauf si la commande ne peut pas échouer (« … || echo … ») :
+        # elle validerait n'importe quoi, et cette couche fait foi. Filtrée aussi
+        # à la planification ; ici pour les plans déjà enregistrés (Retry).
+        if (
+            step.verification_command
+            and not is_tautological(step.verification_command)
+            and (self._cli is not None or self._workspace is not None)
+        ):
             deterministic = await self._layer_deterministic(step)
             if not deterministic.verified:
                 return deterministic
@@ -149,8 +171,9 @@ class Verifier:
                 return VerificationResult(
                     verified=False,
                     layer="deterministic",
-                    issues=[native.detail],
-                    notes="Critère non atteint",
+                    issues=[_failed_check_issue(step.verification_command, native.detail)],
+                    notes=f"Critère non atteint : {native.detail} — vérification « "
+                    f"{step.verification_command} »",
                 )
 
         if self._cli is None:
@@ -187,14 +210,16 @@ class Verifier:
                     unverified=True,
                     notes="Non vérifiée : exécution de commandes désactivée sur cette machine",
                 )
+            sortie = ((res.get("stderr") or "") or (res.get("stdout") or "")).strip()
+            detail = f"code de retour {res.get('returncode')}" + (
+                f", sortie : {sortie[:300]}" if sortie else ""
+            )
             return VerificationResult(
                 verified=False,
                 layer="deterministic",
-                issues=[
-                    f"verification_command rc={res.get('returncode')}: "
-                    f"{(res.get('stderr') or '')[:300]}"
-                ],
-                notes="Commande de vérification déterministe a échoué",
+                issues=[_failed_check_issue(step.verification_command, detail)],
+                notes=f"Critère non atteint : {detail} — vérification « "
+                f"{step.verification_command} »",
             )
         return VerificationResult(verified=True, layer="deterministic")
 

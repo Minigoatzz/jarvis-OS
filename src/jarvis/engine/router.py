@@ -67,9 +67,17 @@ _FILE_DELIVERABLE_RE = re.compile(
     rf"\b{_PRODUCE}\s+(?:moi\s+)?"
     rf"(?:un|une|le|la|les|des|mes|\d+|deux|trois|quatre|cinq|plusieurs)?\s*"
     rf"(?:nouveaux?\s+|nouvelles?\s+|petits?\s+)?"
-    rf"(?:fichiers?|scripts?|programmes?)\b"
+    rf"(?:fichiers?|scripts?|programmes?|rapports?|documents?)\b"
     rf"|\b{_PRODUCE}\s+(?:moi\s+)?(?:un|une|le|la)?\s*"
-    rf"[\w\-]+\.(?:txt|md|py|js|ts|html|css|json|csv|ya?ml|sh|ps1|sql)\b",
+    rf"[\w\-]+\.(?:txt|md|py|js|ts|html|css|json|csv|ya?ml|sh|ps1|sql)\b"
+    # Verbe de production PUIS nom de fichier dans la même proposition, même
+    # éloignés : « rédige un rapport sur ma semaine en 3 sections dans
+    # semaine.md » (28/09) échappait aux deux règles ci-dessus ; le modèle a
+    # appelé memory_write, un outil du chat, et répondu « fichier introuvable ».
+    # [^.!?;\n] : on ne franchit pas une fin de phrase pour aller chercher un
+    # fichier qui appartiendrait à une autre demande.
+    rf"|\b{_PRODUCE}\b[^.!?;\n]{{0,80}}?\b[\w\-]+\."
+    rf"(?:txt|md|py|js|ts|html|css|json|csv|ya?ml|sh|ps1|sql)\b",
     re.IGNORECASE,
 )
 
