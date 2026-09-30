@@ -50,6 +50,9 @@ class ApprovalConfig:
 
     email_draft: ApprovalMode = ApprovalMode.ALWAYS
     email_send: ApprovalMode = ApprovalMode.ASK
+    # Mettre un courriel à la corbeille. Récupérable 30 jours, mais c'est la
+    # limite que tu as fixée : ce qui ressemble à une suppression te demande.
+    email_delete: ApprovalMode = ApprovalMode.ASK
 
     code_write: ApprovalMode = ApprovalMode.ASK
     agent_mission: ApprovalMode = ApprovalMode.ALWAYS

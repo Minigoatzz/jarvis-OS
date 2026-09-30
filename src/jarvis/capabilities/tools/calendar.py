@@ -7,20 +7,22 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from loguru import logger
 
 from jarvis.capabilities.tools.base import Tool, ToolResult
 from jarvis.kernel.error_collector import collector  # jrv: autofix
+from jarvis.kernel.google_auth import load_google_credentials
 
-_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
+
 _CAL_BASE = "https://www.googleapis.com/calendar/v3"
 
 try:
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
+    import google.oauth2.credentials  # noqa: F401 — présence de la dépendance
 
     _HAS_GOOGLE = True
 except ImportError:
@@ -29,35 +31,10 @@ except ImportError:
 
 
 def _load_creds(token_path: Path, credentials_path: Path) -> Credentials:
-    """Charge et rafraîchit les credentials OAuth2 (bloquant — exécuté dans un thread)."""
+    """Token Calendar (bloquant). Jamais de connexion interactive : cf. kernel.google_auth."""
     if not _HAS_GOOGLE:
         raise RuntimeError("google-api-python-client non installé.")
-
-    creds = None
-    if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), _SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception:
-                collector.error("JRV-TOL-001", "JRV-TOL-001")
-                token_path.unlink(missing_ok=True)
-                creds = None
-
-        if not creds or not creds.valid:
-            if not credentials_path.exists():
-                raise FileNotFoundError(
-                    f"Credentials Google manquants : {credentials_path}. "
-                    "Télécharge-les depuis Google Cloud Console → APIs & Services → Credentials."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), _SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        token_path.write_text(creds.to_json())
-
-    return creds
+    return load_google_credentials(token_path, "Google Agenda")
 
 
 class CalendarListTool(Tool):

@@ -18,15 +18,14 @@ from fastapi.responses import RedirectResponse
 from loguru import logger
 
 from jarvis.kernel.error_collector import collector  # jrv: autofix
+from jarvis.kernel.google_auth import CALENDAR_SCOPES, GMAIL_SCOPES
 from jarvis.kernel.settings import settings
 
 router = APIRouter(prefix="/api/google")
 
-_SCOPES_GMAIL = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-]
-_SCOPES_CALENDAR = ["https://www.googleapis.com/auth/calendar"]
+# Source unique des permissions demandées — et de ce qu'elles excluent exprès.
+_SCOPES_GMAIL = GMAIL_SCOPES
+_SCOPES_CALENDAR = CALENDAR_SCOPES
 
 # Endpoints OAuth2 Google — constants, communs à toutes les apps.
 _GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"

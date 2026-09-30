@@ -41,7 +41,13 @@ from jarvis.capabilities.tools.calendar import CalendarCreateTool, CalendarListT
 from jarvis.capabilities.tools.capability import ReportMissingCapabilityTool
 from jarvis.capabilities.tools.cli import CLIRunnerTool, ExecuteCLITool
 from jarvis.capabilities.tools.filesystem import FindFilesTool, ReadFileTool
-from jarvis.capabilities.tools.gmail import GmailListTool, send_gmail_draft
+from jarvis.capabilities.tools.gmail import (
+    GmailListTool,
+    GmailManageTool,
+    GmailReadTool,
+    GmailSendTool,
+    send_gmail_draft,
+)
 from jarvis.capabilities.tools.map_control import MapControlTool
 from jarvis.capabilities.tools.memory import (
     CrossSessionRecallTool,
@@ -311,7 +317,10 @@ def build(
         MemoryLoadTopicTool(topic_store=topic_store),
         MemorySearchTool(vector_index=vector_index),
         SpotifyTool(),
-        GmailListTool(credentials_path=_google_creds, token_path=_gmail_token),
+        GmailListTool(token_path=_gmail_token),
+        GmailReadTool(token_path=_gmail_token),
+        GmailManageTool(token_path=_gmail_token),
+        GmailSendTool(token_path=_gmail_token),
         ExecutePresetTool(tool_registry=tool_registry, tts_engine=tts_engine),
         CrossSessionRecallTool(fts_index=fts_index, vector_index=vector_index),
     )

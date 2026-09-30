@@ -71,6 +71,7 @@
     file_write: "écrire un fichier",
     file_delete: "supprimer un fichier",
     email_send: "envoyer un e-mail",
+    email_delete: "mettre des e-mails à la corbeille",
     web_agent: "piloter un navigateur",
     system_shutdown: "éteindre l'ordinateur",
     system_restart: "redémarrer l'ordinateur",

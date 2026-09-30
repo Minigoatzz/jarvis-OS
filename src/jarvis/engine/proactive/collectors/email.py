@@ -11,20 +11,17 @@ from __future__ import annotations
 import asyncio
 import base64
 from datetime import datetime
-from pathlib import Path
 
 import httpx
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 
 from jarvis.engine.proactive.collectors.base import CollectorBase, SourceUnavailable
 from jarvis.engine.proactive.schemas import ContextItem, ItemType, Priority
 from jarvis.kernel.connectivity import is_offline_mode
 from jarvis.kernel.error_collector import collector  # jrv: autofix
+from jarvis.kernel.google_auth import load_google_credentials
+from jarvis.kernel.paths import PROJECT_ROOT
 from jarvis.kernel.settings import settings
 
-_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 _GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 LOW_PRIORITY_PATTERNS = [
@@ -70,25 +67,6 @@ def _extract_text_body(payload: dict) -> str:
     return ""
 
 
-def _load_gmail_creds(credentials_path: Path, token_path: Path):  # noqa: ANN202
-
-    creds = None
-    if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), _SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not credentials_path.exists():
-                raise FileNotFoundError(f"Credentials Google manquants : {credentials_path}")
-            flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), _SCOPES)
-            creds = flow.run_local_server(port=0)
-        token_path.write_text(creds.to_json())
-
-    return creds
-
-
 class EmailCollector(CollectorBase):
     name = "email"
 
@@ -96,11 +74,9 @@ class EmailCollector(CollectorBase):
         if is_offline_mode():
             raise SourceUnavailable("mode local")
 
-        creds_path = Path(settings.google_credentials_path)
-        token_path = Path(settings.google_token_path).parent / "google_gmail_token.json"
-
+        token_path = PROJECT_ROOT / settings.google_gmail_token_path
         try:
-            creds = await asyncio.to_thread(_load_gmail_creds, creds_path, token_path)
+            creds = await asyncio.to_thread(load_google_credentials, token_path, "Gmail")
         except FileNotFoundError as e:
             collector.warning("JRV-PRO-001", "JRV-PRO-001", cause=e)
             raise SourceUnavailable(str(e)) from e
