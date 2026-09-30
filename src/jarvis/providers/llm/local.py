@@ -80,6 +80,65 @@ def _normalize_message(message: dict) -> dict:
     return {**message, "content": _flatten_content(content)}
 
 
+def _to_ollama_messages(message: dict) -> list[dict]:
+    """Traduit un message au format Anthropic en messages Ollama NATIFS.
+
+    La synthèse (Agent.synthesize) passe les résultats d'outils en blocs `tool_use` /
+    `tool_result`. Ils étaient aplatis en texte : le résultat arrivait au modèle comme
+    un message de l'UTILISATEUR (« [résultat outil] … »). Face à un « utilisateur » qui
+    ne pose aucune question, le modèle recopiait ce texte — « montre-moi mon dernier
+    email » affichait le résultat brut, suivi d'un `/no_think` absent du code de Jarvis
+    (vraisemblablement ajouté côté Ollama au dernier message utilisateur) — ou
+    réécrivait un appel d'outil en texte. Tous les garde-fous contre les notations
+    recopiées (« [outil appelé] », tags nus, rendu non ré-émettable plus haut)
+    soignaient ce symptôme.
+
+    Le protocole natif est celui de tool_loop(), qui marche pour les missions :
+    l'assistant porte ses `tool_calls`, chaque résultat est un message `tool`.
+    Le modèle sait alors que c'est une donnée, et qu'il lui reste à répondre.
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return [_normalize_message(message)]
+
+    def _kind(block: object) -> str:
+        return block.get("type", "") if isinstance(block, dict) else ""
+
+    tool_uses = [b for b in content if _kind(b) == "tool_use"]
+    tool_results = [b for b in content if _kind(b) == "tool_result"]
+    others = [b for b in content if _kind(b) not in ("tool_use", "tool_result")]
+
+    if message.get("role") == "assistant" and tool_uses:
+        return [
+            {
+                "role": "assistant",
+                "content": _flatten_content(others),
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": b.get("input") or {},
+                        }
+                    }
+                    for b in tool_uses
+                ],
+            }
+        ]
+    if tool_results:
+        out = [
+            {"role": "tool", "content": _flatten_content(b.get("content", ""))}
+            for b in tool_results
+        ]
+        if others:
+            out.append({"role": message.get("role", "user"), "content": _flatten_content(others)})
+        return out
+    return [_normalize_message(message)]
+
+
+def _ollama_history(messages: list[dict]) -> list[dict]:
+    return [m for message in messages for m in _to_ollama_messages(message)]
+
+
 def _parse_ollama_tool_calls(
     raw_tool_calls: list[dict], id_hint: str
 ) -> list[tuple[str, str, dict]]:
@@ -164,7 +223,7 @@ class OllamaProvider(LLMProvider):
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
-                *(_normalize_message(m) for m in messages),
+                *_ollama_history(messages),
             ],
             "stream": stream,
             "think": False,  # désactive le mode reasoning Qwen3 côté Ollama
@@ -392,7 +451,7 @@ class OllamaProvider(LLMProvider):
         ollama_tools = _claude_tools_to_ollama(tools)
         current: list[dict] = [
             {"role": "system", "content": system},
-            *(_normalize_message(m) for m in messages),
+            *_ollama_history(messages),
         ]
 
         async def _exec_one(call_id: str, name: str, args: dict) -> tuple[str, str]:
