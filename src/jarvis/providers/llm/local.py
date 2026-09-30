@@ -20,6 +20,14 @@ from jarvis.providers.llm.base import LLMProvider
 # Strip <think>...</think> au cas où Ollama les laisse passer (fallback)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _MAX_TOOL_ITERATIONS = 8
+# Plafond de jetons générés par requête. Sans lui, une génération qui ne
+# s'arrête pas occupe le modèle — PARTAGÉ par le chat, les missions et le moteur
+# proactif — jusqu'à ce que le client coupe : le 30/09, 57 s puis 4 min 59 s
+# (server.log d'Ollama), bouton d'envoi gelé, initiatives bloquées derrière.
+# Une réponse de chat tient largement en 2048 jetons ; un tour d'outil de
+# mission peut écrire un fichier entier dans ses arguments, d'où 4096.
+_MAX_REPLY_TOKENS = 2048
+_MAX_TOOL_TURN_TOKENS = 4096
 
 
 def _strip_think(text: str) -> str:
@@ -78,65 +86,6 @@ def _normalize_message(message: dict) -> dict:
     if isinstance(content, str):
         return message
     return {**message, "content": _flatten_content(content)}
-
-
-def _to_ollama_messages(message: dict) -> list[dict]:
-    """Traduit un message au format Anthropic en messages Ollama NATIFS.
-
-    La synthèse (Agent.synthesize) passe les résultats d'outils en blocs `tool_use` /
-    `tool_result`. Ils étaient aplatis en texte : le résultat arrivait au modèle comme
-    un message de l'UTILISATEUR (« [résultat outil] … »). Face à un « utilisateur » qui
-    ne pose aucune question, le modèle recopiait ce texte — « montre-moi mon dernier
-    email » affichait le résultat brut, suivi d'un `/no_think` absent du code de Jarvis
-    (vraisemblablement ajouté côté Ollama au dernier message utilisateur) — ou
-    réécrivait un appel d'outil en texte. Tous les garde-fous contre les notations
-    recopiées (« [outil appelé] », tags nus, rendu non ré-émettable plus haut)
-    soignaient ce symptôme.
-
-    Le protocole natif est celui de tool_loop(), qui marche pour les missions :
-    l'assistant porte ses `tool_calls`, chaque résultat est un message `tool`.
-    Le modèle sait alors que c'est une donnée, et qu'il lui reste à répondre.
-    """
-    content = message.get("content")
-    if not isinstance(content, list):
-        return [_normalize_message(message)]
-
-    def _kind(block: object) -> str:
-        return block.get("type", "") if isinstance(block, dict) else ""
-
-    tool_uses = [b for b in content if _kind(b) == "tool_use"]
-    tool_results = [b for b in content if _kind(b) == "tool_result"]
-    others = [b for b in content if _kind(b) not in ("tool_use", "tool_result")]
-
-    if message.get("role") == "assistant" and tool_uses:
-        return [
-            {
-                "role": "assistant",
-                "content": _flatten_content(others),
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": b.get("name", ""),
-                            "arguments": b.get("input") or {},
-                        }
-                    }
-                    for b in tool_uses
-                ],
-            }
-        ]
-    if tool_results:
-        out = [
-            {"role": "tool", "content": _flatten_content(b.get("content", ""))}
-            for b in tool_results
-        ]
-        if others:
-            out.append({"role": message.get("role", "user"), "content": _flatten_content(others)})
-        return out
-    return [_normalize_message(message)]
-
-
-def _ollama_history(messages: list[dict]) -> list[dict]:
-    return [m for message in messages for m in _to_ollama_messages(message)]
 
 
 def _parse_ollama_tool_calls(
@@ -223,11 +172,15 @@ class OllamaProvider(LLMProvider):
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
-                *_ollama_history(messages),
+                *(_normalize_message(m) for m in messages),
             ],
             "stream": stream,
             "think": False,  # désactive le mode reasoning Qwen3 côté Ollama
-            "options": {"temperature": 0.7, "num_ctx": settings.ollama_num_ctx},
+            "options": {
+                "temperature": 0.7,
+                "num_ctx": settings.ollama_num_ctx,
+                "num_predict": _MAX_REPLY_TOKENS,
+            },
         }
         if tools:
             payload["tools"] = _claude_tools_to_ollama(tools)
@@ -451,7 +404,7 @@ class OllamaProvider(LLMProvider):
         ollama_tools = _claude_tools_to_ollama(tools)
         current: list[dict] = [
             {"role": "system", "content": system},
-            *_ollama_history(messages),
+            *(_normalize_message(m) for m in messages),
         ]
 
         async def _exec_one(call_id: str, name: str, args: dict) -> tuple[str, str]:
@@ -472,7 +425,11 @@ class OllamaProvider(LLMProvider):
                 "messages": current,
                 "stream": False,
                 "think": False,
-                "options": {"temperature": 0.7, "num_ctx": settings.ollama_num_ctx},
+                "options": {
+                    "temperature": 0.7,
+                    "num_ctx": settings.ollama_num_ctx,
+                    "num_predict": _MAX_TOOL_TURN_TOKENS,
+                },
                 "tools": ollama_tools,
             }
 
