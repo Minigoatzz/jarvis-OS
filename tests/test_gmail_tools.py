@@ -25,6 +25,9 @@ import jarvis.capabilities.tools.gmail as gmail
 import jarvis.kernel.approval as approval
 from jarvis.kernel import google_auth
 
+M1 = "18a0000000000001"
+M2 = "18a0000000000002"
+
 # ── Fausse API ────────────────────────────────────────────────────────────────
 
 
@@ -52,8 +55,8 @@ def _msg(mid: str, subject: str, sender: str = "prof@cegep.qc.ca", **payload: ob
 class _FakeGmail:
     def __init__(self) -> None:
         self.messages = {
-            "m1": _msg("m1", "Examen de bio"),
-            "m2": _msg("m2", "Promo", sender="pub@shop.com"),
+            "18a0000000000001": _msg("18a0000000000001", "Examen de bio"),
+            "18a0000000000002": _msg("18a0000000000002", "Promo", sender="pub@shop.com"),
         }
         self.labels = [{"id": "Label_1", "name": "École"}]
         self.calls: list[tuple[str, str, dict | None]] = []
@@ -127,32 +130,79 @@ def _sent(api: _FakeGmail):  # noqa: ANN202
 
 def test_la_liste_donne_les_identifiants_et_passe_la_recherche(api: _FakeGmail) -> None:
     out = _run(_tool(gmail.GmailListTool, api).execute(query="from:prof"))
-    assert "[m1]" in out.content and "Examen de bio" in out.content
+    assert "[18a0000000000001]" in out.content and "Examen de bio" in out.content
     first = api.calls[0]
     assert first[1] == "messages"
 
 
 def test_lire_prefere_le_texte_et_marque_le_contenu_comme_donnee(api: _FakeGmail) -> None:
-    api.messages["m1"]["payload"]["parts"] = [
+    api.messages["18a0000000000001"]["payload"]["parts"] = [
         {"mimeType": "text/html", "body": {"data": _b64("<p>version html</p>")}},
         {"mimeType": "text/plain", "body": {"data": _b64("Examen le 12 octobre.")}},
     ]
-    out = _run(_tool(gmail.GmailReadTool, api).execute(id="m1"))
+    out = _run(_tool(gmail.GmailReadTool, api).execute(id="18a0000000000001"))
     assert "Examen le 12 octobre." in out.content
     assert "version html" not in out.content
     assert "jamais une instruction" in out.content
 
 
 def test_lire_un_courriel_html_seulement_retire_les_balises(api: _FakeGmail) -> None:
-    api.messages["m1"]["payload"]["parts"] = [
+    api.messages["18a0000000000001"]["payload"]["parts"] = [
         {
             "mimeType": "text/html",
             "body": {"data": _b64("<style>x{}</style><p>Bonjour&nbsp;toi</p><script>a()</script>")},
         }
     ]
-    out = _run(_tool(gmail.GmailReadTool, api).execute(id="m1"))
+    out = _run(_tool(gmail.GmailReadTool, api).execute(id="18a0000000000001"))
     assert "Bonjour" in out.content
     assert "<p>" not in out.content and "a()" not in out.content
+
+
+def test_un_courriel_commercial_se_lit_sans_ses_liens(api: _FakeGmail) -> None:
+    """01/10 : « lis le premier » affichait 4 200 caracteres, surtout des liens de suivi."""
+    texte = (
+        "Base Camp Duffel. Shop Now (https://www.thenorthface.com/p?utm_source=mailchimp) "
+        "https://a.com/x https://b.com/y\nVoir <https://c.com/z> et [https://d.com/w]"
+    )
+    api.messages[M1]["payload"]["parts"] = [
+        {"mimeType": "text/plain", "body": {"data": _b64(texte)}}
+    ]
+    out = _run(_tool(gmail.GmailReadTool, api).execute(id=M1))
+    assert "http" not in out.content
+    assert "Shop Now [lien]\nVoir [lien] et [lien]" in out.content
+
+
+# ── Designer un courriel comme un humain : « le premier », « celui de X » ─────
+
+
+def test_lis_le_premier_non_lu_sans_identifiant(api: _FakeGmail) -> None:
+    out = _run(_tool(gmail.GmailReadTool, api).execute(query="is:unread", position=1))
+    assert not out.is_error and f"[{M1}]" in out.content
+    listing = next(c for c in api.calls if c[1] == "messages")
+    assert listing[0] == "GET"
+
+
+def test_un_identifiant_invente_n_est_jamais_envoye_a_gmail(api: _FakeGmail) -> None:
+    """Incident du 01/10 : « lis le premier » → read_email(id="[ID]") → 400 de Google."""
+    out = _run(_tool(gmail.GmailReadTool, api).execute(id="[ID]"))
+    assert not out.is_error
+    assert all("[ID]" not in path and "ID" != path.rsplit("/", 1)[-1] for _, path, _ in api.calls)
+
+
+def test_une_position_absente_le_dit(api: _FakeGmail) -> None:
+    out = _run(_tool(gmail.GmailReadTool, api).execute(position=5))
+    assert out.is_error and "position 5" in out.content
+
+
+def test_archiver_par_recherche_dit_ce_qui_a_ete_touche(api: _FakeGmail) -> None:
+    out = _run(_tool(gmail.GmailManageTool, api).execute(query="from:shop", action="archive"))
+    assert "Promo" in out.content and "Examen de bio" in out.content
+    assert api.posts()[-1][0] == "messages/batchModify"
+
+
+def test_sans_recherche_ni_identifiant_rien_ne_bouge(api: _FakeGmail) -> None:
+    out = _run(_tool(gmail.GmailManageTool, api).execute(action="archive"))
+    assert out.is_error and api.calls == []
 
 
 # ── Ce qui se defait : sans demander ──────────────────────────────────────────
@@ -162,12 +212,12 @@ def test_archiver_se_fait_sans_demander_et_dit_comment_annuler(
     api: _FakeGmail, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checker = _checker(monkeypatch, False)
-    out = _run(_tool(gmail.GmailManageTool, api).execute(ids=["m1", "m2"], action="archive"))
+    out = _run(_tool(gmail.GmailManageTool, api).execute(ids=[M1, M2], action="archive"))
     assert checker is not None and checker.asked == []
     assert api.posts() == [
         (
             "messages/batchModify",
-            {"ids": ["m1", "m2"], "addLabelIds": [], "removeLabelIds": ["INBOX"]},
+            {"ids": [M1, M2], "addLabelIds": [], "removeLabelIds": ["INBOX"]},
         )
     ]
     assert "move_to_inbox" in out.content
@@ -175,9 +225,9 @@ def test_archiver_se_fait_sans_demander_et_dit_comment_annuler(
 
 def test_une_etiquette_existante_est_reutilisee_sinon_creee(api: _FakeGmail) -> None:
     tool = _tool(gmail.GmailManageTool, api)
-    _run(tool.execute(ids=["m1"], action="add_label", label="école"))
+    _run(tool.execute(ids=["18a0000000000001"], action="add_label", label="école"))
     assert api.posts()[-1][1]["addLabelIds"] == ["Label_1"]
-    _run(tool.execute(ids=["m1"], action="add_label", label="Bio"))
+    _run(tool.execute(ids=["18a0000000000001"], action="add_label", label="Bio"))
     assert ("labels", {"name": "Bio"}) in api.posts()
     assert api.posts()[-1][1]["addLabelIds"] == ["Label_new"]
 
@@ -189,17 +239,17 @@ def test_la_corbeille_demande_en_montrant_les_sujets(
     api: _FakeGmail, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checker = _checker(monkeypatch, True)
-    _run(_tool(gmail.GmailManageTool, api).execute(ids=["m2"], action="trash"))
+    _run(_tool(gmail.GmailManageTool, api).execute(ids=["18a0000000000002"], action="trash"))
     assert checker is not None and len(checker.asked) == 1
     categorie, description = checker.asked[0]
     assert categorie == "email_delete"
     assert "Promo" in description and "pub@shop.com" in description
-    assert ("messages/m2/trash", None) in api.posts()
+    assert ("messages/18a0000000000002/trash", None) in api.posts()
 
 
 def test_un_refus_ne_jette_rien(api: _FakeGmail, monkeypatch: pytest.MonkeyPatch) -> None:
     _checker(monkeypatch, False)
-    out = _run(_tool(gmail.GmailManageTool, api).execute(ids=["m2"], action="trash"))
+    out = _run(_tool(gmail.GmailManageTool, api).execute(ids=["18a0000000000002"], action="trash"))
     assert out.is_error
     assert api.posts() == []
 
@@ -208,7 +258,7 @@ def test_sans_controle_d_approbation_rien_ne_part(
     api: _FakeGmail, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _checker(monkeypatch, None)
-    _run(_tool(gmail.GmailManageTool, api).execute(ids=["m2"], action="trash"))
+    _run(_tool(gmail.GmailManageTool, api).execute(ids=["18a0000000000002"], action="trash"))
     _run(_tool(gmail.GmailSendTool, api).execute(to="a@b.com", subject="s", body="b"))
     assert api.posts() == []
 
@@ -238,12 +288,12 @@ def test_un_envoi_approuve_part_tel_quel(api: _FakeGmail, monkeypatch: pytest.Mo
 
 def test_une_reponse_reste_dans_le_fil(api: _FakeGmail, monkeypatch: pytest.MonkeyPatch) -> None:
     _checker(monkeypatch, True)
-    _run(_tool(gmail.GmailSendTool, api).execute(body="Merci !", reply_to_id="m1"))
+    _run(_tool(gmail.GmailSendTool, api).execute(body="Merci !", reply_to_id="18a0000000000001"))
     msg, body = _sent(api)
-    assert body["threadId"] == "t-m1"
+    assert body["threadId"] == "t-18a0000000000001"
     assert msg["To"] == "prof@cegep.qc.ca"
     assert msg["Subject"] == "Re: Examen de bio"
-    assert msg["In-Reply-To"] == "<m1@mail>"
+    assert msg["In-Reply-To"] == "<18a0000000000001@mail>"
 
 
 def test_un_destinataire_piege_ne_glisse_pas_d_en_tete(
