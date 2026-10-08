@@ -55,7 +55,9 @@ _ACTION_STEMS = _ACTION_PARTICIPLES + r"|ouvert|r[ée]tabli"
 _COMPLETION_CLAIM_RE = re.compile(
     r"(c'est\s+(bien\s+)?(" + _ACTION_STEMS + r"|pars|bon|pause|paus|en\s+pause|parti)"
     r"|voil[àa]\s"
-    r"|\b(est|sont)\s+(bien\s+)?(" + _ACTION_PARTICIPLES + r")"
+    # « été » couvre le passé composé passif : « a été archivé », « ont été
+    # envoyés » — la forme du 08/10, passée à travers alors que rien n'avait tourné.
+    r"|\b(est|sont|été)\s+(bien\s+)?(" + _ACTION_PARTICIPLES + r")"
     r"|\b(j'ai|je\s+l'ai|je\s+les\s+ai)\s+(bien\s+)?(" + _ACTION_STEMS + r")"
     r"|je\s+lance\b)",
     re.IGNORECASE,

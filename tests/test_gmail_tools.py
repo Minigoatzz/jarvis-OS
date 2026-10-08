@@ -195,7 +195,9 @@ def test_une_position_absente_le_dit(api: _FakeGmail) -> None:
 
 
 def test_archiver_par_recherche_dit_ce_qui_a_ete_touche(api: _FakeGmail) -> None:
-    out = _run(_tool(gmail.GmailManageTool, api).execute(query="from:shop", action="archive"))
+    out = _run(
+        _tool(gmail.GmailManageTool, api).execute(query="from:shop", action="archive", limit=50)
+    )
     assert "Promo" in out.content and "Examen de bio" in out.content
     assert api.posts()[-1][0] == "messages/batchModify"
 
@@ -203,6 +205,31 @@ def test_archiver_par_recherche_dit_ce_qui_a_ete_touche(api: _FakeGmail) -> None
 def test_sans_recherche_ni_identifiant_rien_ne_bouge(api: _FakeGmail) -> None:
     out = _run(_tool(gmail.GmailManageTool, api).execute(action="archive"))
     assert out.is_error and api.calls == []
+
+
+def test_une_position_illisible_lit_le_premier(api: _FakeGmail) -> None:
+    """08/10 : read_email(position="au complet") faisait planter l'outil."""
+    out = _run(_tool(gmail.GmailReadTool, api).execute(position="au complet"))
+    assert not out.is_error and f"[{M1}]" in out.content
+
+
+def test_par_recherche_un_seul_courriel_par_defaut(
+    api: _FakeGmail, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """08/10 : « supprime mon dernier courriel » visait 6 courriels."""
+    checker = _checker(monkeypatch, True)
+    _run(_tool(gmail.GmailManageTool, api).execute(query="from:moi", action="trash"))
+    recherche = next(c for c in api.calls if c[1] == "messages")
+    assert checker is not None and checker.asked[0][1].startswith("Mettre 1 courriel")
+    assert [p for p, _ in api.posts()] == [f"messages/{M1}/trash"]
+    assert recherche[0] == "GET"
+
+
+def test_tous_les_courriels_quand_on_le_demande(api: _FakeGmail) -> None:
+    out = _run(
+        _tool(gmail.GmailManageTool, api).execute(query="from:shop", action="archive", limit=50)
+    )
+    assert "2 courriel(s)" in out.content
 
 
 # ── Ce qui se defait : sans demander ──────────────────────────────────────────

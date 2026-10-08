@@ -236,10 +236,25 @@ def _body_text(payload: dict) -> str:
     return _clean_body(_strip_html(found.get("text/html", "")))
 
 
+def _as_int(value: object, default: int) -> int:
+    """Entier venu du modèle : « 2 », 2, ou n'importe quoi d'autre → `default`.
+
+    08/10 : « lis-le au complet » → read_email(position="au complet") → int()
+    levait, et l'outil plantait au lieu de lire le premier courriel.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        # jrv: valeur illisible du modèle — repli documenté, pas une panne.
+        # Volontairement non mappé (scripts/error_audit/scan.py).
+        return default
+
+
 async def _find(s: _Session, query: str, limit: int) -> list[str]:
     """Identifiants des `limit` premiers résultats d'une recherche, plus récents d'abord."""
     params = {"q": query, "maxResults": max(1, min(limit, _MAX_IDS))}
-    return [m["id"] for m in (await s.call("GET", "messages", params=params)).get("messages", [])]
+    found = (await s.call("GET", "messages", params=params)).get("messages", [])
+    return [m["id"] for m in found][:limit]  # la limite ne dépend pas que de Google
 
 
 async def _describe(s: _Session, ids: list[str], limit: int = 8) -> list[str]:
@@ -388,7 +403,7 @@ class GmailReadTool(_GmailTool):
         **_: object,
     ) -> ToolResult:
         query = query.strip() or "in:inbox"
-        position = max(1, int(position or 1))
+        position = max(1, _as_int(position, 1))
         # Un identifiant inventé (« [ID] », « 1 ») n'est pas un identifiant Gmail.
         ident = id.strip().strip("[]")
         if ident and not re.fullmatch(r"[0-9a-fA-F]{10,}", ident):
@@ -441,6 +456,14 @@ class GmailManageTool(_GmailTool):
                     "'is:unread category:promotions'. 50 au plus, les plus récents."
                 ),
             },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Combien de courriels de la recherche, les plus récents d'abord. "
+                    "1 par défaut (« le courriel de X ») ; pour « tous les courriels "
+                    "de X », mets 50."
+                ),
+            },
             "ids": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -459,6 +482,7 @@ class GmailManageTool(_GmailTool):
         self,
         action: str = "",
         query: str = "",
+        limit: object = 1,
         ids: list[str] | None = None,
         label: str = "",
         **_: object,
@@ -479,7 +503,10 @@ class GmailManageTool(_GmailTool):
         try:
             async with self._gmail.session() as s:
                 if not ids:
-                    ids = await _find(s, query.strip(), _MAX_IDS)
+                    # 1 par défaut : « supprime mon dernier courriel » visait 6
+                    # courriels le 08/10, faute de limite. Tous ? Il faut le dire.
+                    count = max(1, min(_as_int(limit, 1), _MAX_IDS))
+                    ids = await _find(s, query.strip(), count)
                     if not ids:
                         return ToolResult(content=f"Aucun courriel pour « {query.strip()} ».")
                 touched = await _describe(s, ids)

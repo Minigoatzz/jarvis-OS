@@ -28,6 +28,9 @@ from jarvis.engine.agent import claims_completion
         "Les fichiers sont créés.",
         "Je l’ai mis en pause.",
         "J’ai ouvert Spotify.",
+        "[Courriel de Jean Coutu] a été archivé. Tu veux lire le prochain ?",  # 08/10
+        '[Email "Test Jarvis"] a été supprimé.',  # 08/10
+        "Ils ont été déplacés.",
     ],
 )
 def test_les_affirmations_typographiques_sont_detectees(phrase: str) -> None:
@@ -42,6 +45,7 @@ def test_les_affirmations_typographiques_sont_detectees(phrase: str) -> None:
         "C’est un courriel de Jean Coutu sur une livraison rapide.",
         "Il est jouable de partir tôt.",
         "Le magasin est ouvert jusqu’à 21h.",
+        "L’été dernier était chaud.",
     ],
 )
 def test_une_reponse_ordinaire_n_est_pas_une_affirmation(phrase: str) -> None:
