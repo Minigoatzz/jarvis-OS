@@ -10,6 +10,16 @@ from jarvis.capabilities.tools.base import Tool, ToolResult
 from jarvis.kernel.error_collector import collector
 from jarvis.kernel.subprocess_compat import describe_exception
 
+_BRIEF_CHARS = 300
+
+
+def _brief(value: object) -> str:
+    """Une ligne de log lisible : sauts de ligne aplatis, longueur bornée."""
+    text = " ".join(str(value).split())
+    if len(text) <= _BRIEF_CHARS:
+        return text
+    return f"{text[:_BRIEF_CHARS]}… [{len(text)} car.]"
+
 _TOOL_CODES: dict[str, str] = {
     "spotify": "JRV-TOL-002",
     "gmail": "JRV-TOL-003",
@@ -95,6 +105,13 @@ class ToolRegistry:
             )
         try:
             result = await tool.execute(**inputs)
+            # Ce que l'outil a REÇU et RENDU, en clair dans api.log. Sans ça, une
+            # réponse comme « un courriel de Jean Coutu » était invérifiable :
+            # le journal disait qu'un outil avait tourné, jamais ce qu'il avait vu.
+            logger.info(
+                f"Tool {name} | entrées={_brief(inputs)} | "
+                f"{'ÉCHEC' if result.is_error else 'résultat'}={_brief(result.content)}"
+            )
             if result.is_error:
                 collector.error(code, f"Tool {name} returned error")
                 return ToolResult(

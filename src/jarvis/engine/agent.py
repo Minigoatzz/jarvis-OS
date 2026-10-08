@@ -37,15 +37,30 @@ _TOOL_ERROR_RE = re.compile(r"^\[JRV-[A-Z]+-\d+\]")
 # Formules par lesquelles le modèle affirme qu'une action a eu lieu. Toutes
 # relevées dans des échanges réels où AUCUN outil n'avait tourné : « C'est
 # lancé, le cockpit est affiché. », « C'est fait. », « Voilà la météo. »
+#
+# Le 07/10, « archive celui de Jean Coutu » → « C’est fait, le courriel de Jean
+# Coutu est archivé. », puis « annule » → « C’est annulé. » — AUCUN outil n'avait
+# tourné. Deux trous : l'apostrophe typographique (’) que le modèle emploie ne
+# correspondait pas à « c'est », et « archivé », « annulé » n'étaient pas listés.
+# Un participe passé d'action (« archivé », « lancée ») ou une forme irrégulière
+# (« fait », « mis ») — jamais un simple radical : « il est jouable » n'affirme rien.
+# « ouvert » et « rétabli » restent hors de la forme passive : « le magasin est
+# ouvert » est un fait, pas une action de Jarvis.
+_ACTION_PARTICIPLES = (
+    r"(?:lanc|affich|activ|ferm|archiv|annul|envoy|supprim|effac|d[ée]plac|ajout|cr[ée]|"
+    r"enregistr|programm|planifi|coup|arr[êe]t|relanc|jou|marqu|class|sauvegard|"
+    r"transf[ée]r|modifi|restaur)[ée]e?s?\b|fait|mis\b|remis"
+)
+_ACTION_STEMS = _ACTION_PARTICIPLES + r"|ouvert|r[ée]tabli"
 _COMPLETION_CLAIM_RE = re.compile(
-    r"(c'est\s+(lanc|fait|pars|bon|pause|paus)"
+    r"(c'est\s+(bien\s+)?(" + _ACTION_STEMS + r"|pars|bon|pause|paus|en\s+pause|parti)"
     r"|voil[àa]\s"
-    r"|est\s+(affich|lanc|activ)"
-    r"|j'ai\s+(lanc|affich|ouvert|mis|activ)"
-    r"|je\s+lance\b"
-    r"|c'est\s+parti)",
+    r"|\b(est|sont)\s+(bien\s+)?(" + _ACTION_PARTICIPLES + r")"
+    r"|\b(j'ai|je\s+l'ai|je\s+les\s+ai)\s+(bien\s+)?(" + _ACTION_STEMS + r")"
+    r"|je\s+lance\b)",
     re.IGNORECASE,
 )
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u02bc": "'", "\u2018": "'"})
 
 
 # Un jeton entre crochets, seul sur la ligne : « [Cockpit] », « [Globe] ».
@@ -112,7 +127,7 @@ def claims_completion(text: str) -> bool:
     « C'est lancé, le cockpit est affiché. » est partie telle quelle alors que
     le journal ne montre aucun `Tool executed` sur ce tour.
     """
-    return bool(_COMPLETION_CLAIM_RE.search(text))
+    return bool(_COMPLETION_CLAIM_RE.search(text.translate(_APOSTROPHES)))
 
 
 def _is_tool_error(result: str) -> bool:
@@ -569,8 +584,10 @@ class Agent:
                 "- Ne recopie ni le résultat brut ni les identifiants techniques : "
                 "résume ce qui compte (pour des courriels : qui écrit, à quel sujet).\n"
                 "- Court : l'essentiel en 2 ou 3 phrases, puis propose d'en dire plus. "
-                "Un long contenu (un courriel, une liste) se résume ; le texte intégral "
-                "seulement si on te le demande explicitement.\n"
+                "Résumer, c'est dire ce que le contenu DIT (l'offre, la demande, la "
+                "date, ce qu'on attend de toi), pas seulement qui l'envoie.\n"
+                "- Si on te demande de lire « en entier », « au complet », « tout » : "
+                "donne le texte complet du résultat, sans les « [lien] ».\n"
                 "- Texte simple, SANS markdown : ni `**`, ni `#`, ni liste numérotée ou à "
                 "puces. La réponse s'affiche telle quelle et elle est lue à voix haute.\n"
                 "- Si un résultat signale une erreur, dis-le simplement."
