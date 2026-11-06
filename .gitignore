@@ -73,3 +73,5 @@ tools/arduino-cli/*
 !tools/arduino-cli/.gitkeep
 
 keypad/firmware/Object File1/
+# Mesures locales (scripts/diag_native_calls.py) : propres a cette machine
+scripts/diag_results/

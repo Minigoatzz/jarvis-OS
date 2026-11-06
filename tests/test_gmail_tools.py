@@ -232,6 +232,22 @@ def test_tous_les_courriels_quand_on_le_demande(api: _FakeGmail) -> None:
     assert "2 courriel(s)" in out.content
 
 
+def test_une_action_inventee_renvoie_vers_le_bon_outil(api: _FakeGmail) -> None:
+    """Mesure du 08/10 : « lis le dernier courriel de Jean Coutu » →
+    manage_emails(action="search"), 3 fois sur 3."""
+    out = _run(_tool(gmail.GmailManageTool, api).execute(query="from:x", action="search"))
+    assert out.is_error and "read_email" in out.content
+    assert api.calls == [], "rien n'est touche"
+
+
+def test_rien_dans_manage_emails_ne_ressemble_a_une_lecture() -> None:
+    """La description de `limit` citait « le courriel de X » : l'exemple d'une
+    demande de LECTURE, dans l'outil qui ARCHIVE."""
+    schema = json.dumps(gmail.GmailManageTool.input_schema, ensure_ascii=False)
+    assert "le courriel de X" not in schema
+    assert "read_email" in gmail.GmailManageTool.description
+
+
 # ── Ce qui se defait : sans demander ──────────────────────────────────────────
 
 
