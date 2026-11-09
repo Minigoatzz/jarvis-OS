@@ -396,7 +396,21 @@ d'outils qui attirent les mauvaises demandes ; un doublon d'outil (sauf les cart
 Pour chacun : mesure du corpus avant et après sur le même commit de départ, un commit
 par changement, barrières à parité, et une ligne dans le journal avec le gain mesuré.
 Un changement qui n'apporte pas de gain mesurable est **annulé**, même s'il « semble
-plus propre ». Un réglage de `.env` (comme `keep_alive`) ne se modifie pas : propose la
+plus propre ».
+
+**Trois protections contre les fausses victoires :**
+- **Jeu de contrôle** : avant la première mesure de la phase 3, mets de côté environ un
+  quart du corpus (15 cas, toutes catégories). Tu ne t'en sers **jamais** pour choisir ou
+  ajuster un correctif ; tu le mesures une seule fois, à la fin de la phase 7. Si le
+  corpus de travail monte et que le jeu de contrôle ne monte pas, tu as ajusté Jarvis au
+  test, pas à Liam : dis-le dans le rapport.
+- **Seuil de bruit** : mesure deux fois la référence ; l'écart entre ces deux mesures est
+  le bruit. Un gain plus petit que ce bruit n'est pas un gain.
+- **Pas de boucle** : chaque cause trouvée en phase 4 est traitée **une fois**. Un
+  correctif qui échoue est annulé et noté ; tu peux tenter **une** seconde idée
+  vraiment différente, pas des retouches de la même. Ensuite, la cause passe dans la
+  feuille de route avec ce que tu as appris. Tu ne retouches jamais le prompt jusqu'à ce
+  qu'un score passe. Un réglage de `.env` (comme `keep_alive`) ne se modifie pas : propose la
 ligne exacte à Liam, avec la mesure qui la justifie.
 
 ### Phase 8 — Construire la garantie 5 (journal d'actions et « annule »)
